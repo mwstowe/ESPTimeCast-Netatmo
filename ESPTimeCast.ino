@@ -49,7 +49,6 @@ bool isNetatmoTokenValid();
 bool checkNetworkConnectivity();
 bool writeChunkedResponseToFile(WiFiClient* stream, File& file);
 bool isChunkedResponse(HTTPClient& http);
-void optimizeMemory(); // Add this line // Add this line
 String urlEncode(const char* input);
 void exchangeAuthCode(const String &code);
 void handleBlockedRequest(String errorPayload);
@@ -95,7 +94,7 @@ void createDefaultConfig() {
   }
   
   // Create a minimal config first
-  DynamicJsonDocument doc(1024); // Increased size to accommodate all fields
+  JsonDocument doc; // Increased size to accommodate all fields
   doc[F("ssid")] = "";
   doc[F("password")] = "";
   doc[F("mdnsHostname")] = "esptime";
@@ -116,8 +115,6 @@ void createDefaultConfig() {
   // Netatmo fields (excluding tokens)
   doc[F("netatmoClientId")] = "";
   doc[F("netatmoClientSecret")] = "";
-  doc[F("netatmoUsername")] = "";
-  doc[F("netatmoPassword")] = "";
   doc[F("netatmoDeviceId")] = "";
   doc[F("netatmoModuleId")] = "";
   doc[F("netatmoIndoorModuleId")] = "";
@@ -141,7 +138,7 @@ void createDefaultConfig() {
   Serial.println(F("[CONFIG] Default config.json created successfully"));
   
   // Create default tokens.json
-  DynamicJsonDocument tokenDoc(256);
+  JsonDocument tokenDoc;
   tokenDoc[F("netatmoAccessToken")] = "";
   tokenDoc[F("netatmoRefreshToken")] = "";
   
@@ -217,8 +214,6 @@ char password[32] = "";
 // Netatmo API credentials and tokens
 char netatmoClientId[64] = "";
 char netatmoClientSecret[64] = "";
-char netatmoUsername[64] = "";
-char netatmoPassword[64] = "";
 char netatmoAccessToken[256] = "";
 char netatmoRefreshToken[256] = "";
 char netatmoDeviceId[64] = "";
@@ -277,6 +272,17 @@ char daysOfTheWeek[7][12] = {"&", "*", "/", "?", "@", "=", "$"};
 char indoorSymbol[12] = {"^"};  // Custom symbol for indoor temperature (IN)
 char outdoorSymbol[12] = {"~"}; // Custom symbol for outdoor temperature (OUT)
 
+// Netatmo status for display indicators
+enum NetatmoStatus {
+  NETATMO_OK,        // Working fine
+  NETATMO_NO_TOKEN,  // No token, needs OAuth2 auth -> "auth"
+  NETATMO_AUTH_FAIL, // Token refresh failed          -> "auth"
+  NETATMO_CONN_FAIL, // Connection/network error      -> "conn"
+  NETATMO_NO_CONFIG, // Missing device/module IDs     -> "conf"
+  NETATMO_API_ERROR  // API returned an error         -> "err"
+};
+NetatmoStatus netatmoStatus = NETATMO_OK;
+
 // Flag to track if refresh token authentication has failed
 bool refreshTokenAuthFailed = false;
 
@@ -303,7 +309,6 @@ void printConfigToSerial() {
   Serial.print(F("WiFi Password: ")); Serial.println(password);
   Serial.print(F("Netatmo Client ID: ")); Serial.println(netatmoClientId);
   Serial.print(F("Netatmo Client Secret: ")); Serial.println(netatmoClientSecret);
-  Serial.print(F("Netatmo Username: ")); Serial.println(netatmoUsername);
   Serial.print(F("Netatmo Device ID: ")); Serial.println(netatmoDeviceId);
   Serial.print(F("Netatmo Module ID: ")); Serial.println(netatmoModuleId);
   Serial.print(F("Temperature Unit: ")); Serial.println(weatherUnits);
@@ -378,7 +383,7 @@ void loadConfig() {
   }
   
   size_t size = configFile.size();
-  if (size == 0 || size > 1024) {
+  if (size == 0 || size > 2048) {
     Serial.println(F("[ERROR] Invalid config file size"));
     configFile.close();
     return;
@@ -387,7 +392,7 @@ void loadConfig() {
   String jsonString = configFile.readString();
   configFile.close();
   
-  DynamicJsonDocument doc(2048);
+  JsonDocument doc;
   DeserializationError error = deserializeJson(doc, jsonString);
   if (error) {
     Serial.print(F("[ERROR] JSON parse failed: "));
@@ -396,20 +401,18 @@ void loadConfig() {
   }
   
   // Load main configuration settings
-  if (doc.containsKey("ssid")) strlcpy(ssid, doc["ssid"], sizeof(ssid));
-  if (doc.containsKey("password")) strlcpy(password, doc["password"], sizeof(password));
-  if (doc.containsKey("netatmoClientId")) strlcpy(netatmoClientId, doc["netatmoClientId"], sizeof(netatmoClientId));
-  if (doc.containsKey("netatmoClientSecret")) strlcpy(netatmoClientSecret, doc["netatmoClientSecret"], sizeof(netatmoClientSecret));
-  if (doc.containsKey("netatmoUsername")) strlcpy(netatmoUsername, doc["netatmoUsername"], sizeof(netatmoUsername));
-  if (doc.containsKey("netatmoPassword")) strlcpy(netatmoPassword, doc["netatmoPassword"], sizeof(netatmoPassword));
+  if (doc["ssid"].is<JsonVariant>()) strlcpy(ssid, doc["ssid"], sizeof(ssid));
+  if (doc["password"].is<JsonVariant>()) strlcpy(password, doc["password"], sizeof(password));
+  if (doc["netatmoClientId"].is<JsonVariant>()) strlcpy(netatmoClientId, doc["netatmoClientId"], sizeof(netatmoClientId));
+  if (doc["netatmoClientSecret"].is<JsonVariant>()) strlcpy(netatmoClientSecret, doc["netatmoClientSecret"], sizeof(netatmoClientSecret));
   
   // Load Netatmo settings from main config
-  if (doc.containsKey("netatmoDeviceId")) strlcpy(netatmoDeviceId, doc["netatmoDeviceId"], sizeof(netatmoDeviceId));
-  if (doc.containsKey("netatmoModuleId")) strlcpy(netatmoModuleId, doc["netatmoModuleId"], sizeof(netatmoModuleId));
-  if (doc.containsKey("netatmoIndoorModuleId")) strlcpy(netatmoIndoorModuleId, doc["netatmoIndoorModuleId"], sizeof(netatmoIndoorModuleId));
-  if (doc.containsKey("netatmoStationId")) strlcpy(netatmoStationId, doc["netatmoStationId"], sizeof(netatmoStationId));
-  if (doc.containsKey("useNetatmoOutdoor")) useNetatmoOutdoor = doc["useNetatmoOutdoor"];
-  if (doc.containsKey("prioritizeNetatmoIndoor")) {
+  if (doc["netatmoDeviceId"].is<JsonVariant>()) strlcpy(netatmoDeviceId, doc["netatmoDeviceId"], sizeof(netatmoDeviceId));
+  if (doc["netatmoModuleId"].is<JsonVariant>()) strlcpy(netatmoModuleId, doc["netatmoModuleId"], sizeof(netatmoModuleId));
+  if (doc["netatmoIndoorModuleId"].is<JsonVariant>()) strlcpy(netatmoIndoorModuleId, doc["netatmoIndoorModuleId"], sizeof(netatmoIndoorModuleId));
+  if (doc["netatmoStationId"].is<JsonVariant>()) strlcpy(netatmoStationId, doc["netatmoStationId"], sizeof(netatmoStationId));
+  if (doc["useNetatmoOutdoor"].is<JsonVariant>()) useNetatmoOutdoor = doc["useNetatmoOutdoor"];
+  if (doc["prioritizeNetatmoIndoor"].is<JsonVariant>()) {
     prioritizeNetatmoIndoor = doc["prioritizeNetatmoIndoor"];
     // Set tempSource based on prioritizeNetatmoIndoor setting
     tempSource = prioritizeNetatmoIndoor ? 1 : 0;
@@ -420,17 +423,17 @@ void loadConfig() {
     Serial.println(F("[CONFIG] Loading tokens from tokens.json"));
     File tokenFile = LittleFS.open("/tokens.json", "r");
     if (tokenFile) {
-      DynamicJsonDocument tokenDoc(512);
+      JsonDocument tokenDoc;
       DeserializationError tokenError = deserializeJson(tokenDoc, tokenFile);
       tokenFile.close();
       
       if (!tokenError) {
-        if (tokenDoc.containsKey("netatmoAccessToken")) {
+        if (tokenDoc["netatmoAccessToken"].is<JsonVariant>()) {
           strlcpy(netatmoAccessToken, tokenDoc["netatmoAccessToken"], sizeof(netatmoAccessToken));
           Serial.println(F("[CONFIG] Loaded access token from tokens.json"));
         }
         
-        if (tokenDoc.containsKey("netatmoRefreshToken")) {
+        if (tokenDoc["netatmoRefreshToken"].is<JsonVariant>()) {
           strlcpy(netatmoRefreshToken, tokenDoc["netatmoRefreshToken"], sizeof(netatmoRefreshToken));
           Serial.println(F("[CONFIG] Loaded refresh token from tokens.json"));
         }
@@ -445,12 +448,12 @@ void loadConfig() {
     Serial.println(F("[CONFIG] tokens.json not found, checking for tokens in config.json"));
     
     // For backward compatibility, check if tokens are in config.json
-    if (doc.containsKey("netatmoAccessToken")) {
+    if (doc["netatmoAccessToken"].is<JsonVariant>()) {
       strlcpy(netatmoAccessToken, doc["netatmoAccessToken"], sizeof(netatmoAccessToken));
       Serial.println(F("[CONFIG] Loaded access token from config.json"));
     }
     
-    if (doc.containsKey("netatmoRefreshToken")) {
+    if (doc["netatmoRefreshToken"].is<JsonVariant>()) {
       strlcpy(netatmoRefreshToken, doc["netatmoRefreshToken"], sizeof(netatmoRefreshToken));
       Serial.println(F("[CONFIG] Loaded refresh token from config.json"));
       
@@ -471,11 +474,11 @@ void loadConfig() {
   // Check if Netatmo fields exist in the JSON
   Serial.println(F("[CONFIG] Checking for Netatmo fields in config.json:"));
   Serial.print(F("[CONFIG] netatmoDeviceId exists: "));
-  Serial.println(doc.containsKey("netatmoDeviceId") ? "Yes" : "No");
+  Serial.println(doc["netatmoDeviceId"].is<JsonVariant>() ? "Yes" : "No");
   Serial.print(F("[CONFIG] netatmoModuleId exists: "));
-  Serial.println(doc.containsKey("netatmoModuleId") ? "Yes" : "No");
+  Serial.println(doc["netatmoModuleId"].is<JsonVariant>() ? "Yes" : "No");
   Serial.print(F("[CONFIG] netatmoStationId exists: "));
-  Serial.println(doc.containsKey("netatmoStationId") ? "Yes" : "No");
+  Serial.println(doc["netatmoStationId"].is<JsonVariant>() ? "Yes" : "No");
   
   // Debug output for Netatmo settings
   Serial.println(F("[CONFIG] Netatmo settings loaded:"));
@@ -491,21 +494,21 @@ void loadConfig() {
   Serial.print(F("[CONFIG] Indoor Module ID: '"));
   Serial.print(netatmoIndoorModuleId);
   Serial.println(F("'"));
-  if (doc.containsKey("tempSource")) tempSource = doc["tempSource"];
-  if (doc.containsKey("mdnsHostname")) strlcpy(mdnsHostname, doc["mdnsHostname"], sizeof(mdnsHostname));
-  if (doc.containsKey("weatherUnits")) strlcpy(weatherUnits, doc["weatherUnits"], sizeof(weatherUnits));
-  if (doc.containsKey("clockDuration")) clockDuration = doc["clockDuration"];
-  if (doc.containsKey("weatherDuration")) weatherDuration = doc["weatherDuration"];
-  if (doc.containsKey("timeZone")) strlcpy(timeZone, doc["timeZone"], sizeof(timeZone));
-  if (doc.containsKey("brightness")) brightness = doc["brightness"];
-  if (doc.containsKey("tempAdjust")) tempAdjust = doc["tempAdjust"];
-  if (doc.containsKey("flipDisplay")) flipDisplay = doc["flipDisplay"];
-  if (doc.containsKey("twelveHourToggle")) twelveHourToggle = doc["twelveHourToggle"];
-  if (doc.containsKey("showDayOfWeek")) showDayOfWeek = doc["showDayOfWeek"];
-  if (doc.containsKey("showIndoorTemp")) showIndoorTemp = doc["showIndoorTemp"]; else showIndoorTemp = true;
-  if (doc.containsKey("showOutdoorTemp")) showOutdoorTemp = doc["showOutdoorTemp"]; else showOutdoorTemp = true;
-  if (doc.containsKey("ntpServer1")) strlcpy(ntpServer1, doc["ntpServer1"], sizeof(ntpServer1));
-  if (doc.containsKey("ntpServer2")) strlcpy(ntpServer2, doc["ntpServer2"], sizeof(ntpServer2));
+  if (doc["tempSource"].is<JsonVariant>()) tempSource = doc["tempSource"];
+  if (doc["mdnsHostname"].is<JsonVariant>()) strlcpy(mdnsHostname, doc["mdnsHostname"], sizeof(mdnsHostname));
+  if (doc["weatherUnits"].is<JsonVariant>()) strlcpy(weatherUnits, doc["weatherUnits"], sizeof(weatherUnits));
+  if (doc["clockDuration"].is<JsonVariant>()) clockDuration = doc["clockDuration"];
+  if (doc["weatherDuration"].is<JsonVariant>()) weatherDuration = doc["weatherDuration"];
+  if (doc["timeZone"].is<JsonVariant>()) strlcpy(timeZone, doc["timeZone"], sizeof(timeZone));
+  if (doc["brightness"].is<JsonVariant>()) brightness = doc["brightness"];
+  if (doc["tempAdjust"].is<JsonVariant>()) tempAdjust = doc["tempAdjust"];
+  if (doc["flipDisplay"].is<JsonVariant>()) flipDisplay = doc["flipDisplay"];
+  if (doc["twelveHourToggle"].is<JsonVariant>()) twelveHourToggle = doc["twelveHourToggle"];
+  if (doc["showDayOfWeek"].is<JsonVariant>()) showDayOfWeek = doc["showDayOfWeek"];
+  if (doc["showIndoorTemp"].is<JsonVariant>()) showIndoorTemp = doc["showIndoorTemp"]; else showIndoorTemp = true;
+  if (doc["showOutdoorTemp"].is<JsonVariant>()) showOutdoorTemp = doc["showOutdoorTemp"]; else showOutdoorTemp = true;
+  if (doc["ntpServer1"].is<JsonVariant>()) strlcpy(ntpServer1, doc["ntpServer1"], sizeof(ntpServer1));
+  if (doc["ntpServer2"].is<JsonVariant>()) strlcpy(ntpServer2, doc["ntpServer2"], sizeof(ntpServer2));
   
   if (strcmp(weatherUnits, "imperial") == 0)
     tempSymbol = 'F';
@@ -586,23 +589,6 @@ void setupTime() {
 
 void setupWebServer() {
   Serial.println(F("[WEBSERVER] Setting up web server..."));
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    Serial.println(F("[WEBSERVER] Request: /"));
-    request->send(LittleFS, "/index.html", "text/html");
-  });
-  
-  server.on("/netatmo.html", HTTP_GET, [](AsyncWebServerRequest *request){
-    Serial.println(F("[WEBSERVER] Request: /netatmo.html"));
-    
-    // Check if we should handle this request
-    if (!shouldHandleWebRequest()) {
-      request->send(503, "text/plain", "Server busy, try again later");
-      return;
-    }
-    
-    // Use streaming response to reduce memory usage
-    sendFileWithEnhancedHeaders(request, "/netatmo.html", "text/html");
-  });
   
   server.on("/config.json", HTTP_GET, [](AsyncWebServerRequest *request){
     Serial.println(F("[WEBSERVER] Request: /config.json"));
@@ -685,7 +671,7 @@ void setupWebServer() {
       return;
     }
     
-    DynamicJsonDocument doc(2048);
+    JsonDocument doc;
     DeserializationError err = deserializeJson(doc, f);
     f.close();
     if (err) {
@@ -707,14 +693,14 @@ void setupWebServer() {
     
     // Debug: Print the values of netatmoClientId and netatmoClientSecret
     Serial.print(F("[WEBSERVER] netatmoClientId in config: "));
-    if (doc.containsKey("netatmoClientId")) {
+    if (doc["netatmoClientId"].is<JsonVariant>()) {
       Serial.println(doc["netatmoClientId"].as<String>());
     } else {
       Serial.println(F("(not found)"));
     }
     
     Serial.print(F("[WEBSERVER] netatmoClientSecret in config: "));
-    if (doc.containsKey("netatmoClientSecret")) {
+    if (doc["netatmoClientSecret"].is<JsonVariant>()) {
       Serial.println(F("(present but not shown)"));
     } else {
       Serial.println(F("(not found)"));
@@ -729,7 +715,7 @@ void setupWebServer() {
     Serial.println(F("[WEBSERVER] Request: /save"));    
     
     // First, read the existing config file to preserve all settings
-    DynamicJsonDocument doc(2048);
+    JsonDocument doc;
     bool configExists = false;
     
     if (LittleFS.exists("/config.json")) {
@@ -744,11 +730,11 @@ void setupWebServer() {
           
           // Debug: Print Netatmo settings before update
           Serial.println(F("[WEBSERVER] Netatmo settings before update:"));
-          if (doc.containsKey("netatmoDeviceId")) {
+          if (doc["netatmoDeviceId"].is<JsonVariant>()) {
             Serial.print(F("[WEBSERVER] netatmoDeviceId: "));
             Serial.println(doc["netatmoDeviceId"].as<String>());
           }
-          if (doc.containsKey("netatmoModuleId")) {
+          if (doc["netatmoModuleId"].is<JsonVariant>()) {
             Serial.print(F("[WEBSERVER] netatmoModuleId: "));
             Serial.println(doc["netatmoModuleId"].as<String>());
           }
@@ -786,7 +772,7 @@ void setupWebServer() {
     File f = LittleFS.open("/config.json", "w");
     if (!f) {
       Serial.println(F("[WEBSERVER] Failed to open /config.json for writing"));
-      DynamicJsonDocument errorDoc(256);
+      JsonDocument errorDoc;
       errorDoc[F("error")] = "Failed to write config";
       String response;
       serializeJson(errorDoc, response);
@@ -796,11 +782,11 @@ void setupWebServer() {
     
     // Debug: Print Netatmo settings after update
     Serial.println(F("[WEBSERVER] Netatmo settings after update:"));
-    if (doc.containsKey("netatmoDeviceId")) {
+    if (doc["netatmoDeviceId"].is<JsonVariant>()) {
       Serial.print(F("[WEBSERVER] netatmoDeviceId: "));
       Serial.println(doc["netatmoDeviceId"].as<String>());
     }
-    if (doc.containsKey("netatmoModuleId")) {
+    if (doc["netatmoModuleId"].is<JsonVariant>()) {
       Serial.print(F("[WEBSERVER] netatmoModuleId: "));
       Serial.println(doc["netatmoModuleId"].as<String>());
     }
@@ -834,20 +820,20 @@ void setupWebServer() {
     }
     
     File verify = LittleFS.open("/config.json", "r");
-    DynamicJsonDocument test(2048);
+    JsonDocument test;
     DeserializationError err = deserializeJson(test, verify);
     verify.close();
     if (err) {
       Serial.print(F("[WEBSERVER] Config corrupted after save: "));
       Serial.println(err.f_str());
-      DynamicJsonDocument errorDoc(256);
+      JsonDocument errorDoc;
       errorDoc[F("error")] = "Config corrupted. Reboot cancelled.";
       String response;
       serializeJson(errorDoc, response);
       request->send(500, "application/json", response);
       return;
     }
-    DynamicJsonDocument okDoc(128);
+    JsonDocument okDoc;
     okDoc[F("message")] = "Saved successfully. Rebooting...";
     String response;
     serializeJson(okDoc, response);
@@ -869,7 +855,7 @@ void setupWebServer() {
       File src = LittleFS.open("/config.bak", "r");
       if (!src) {
         Serial.println(F("[WEBSERVER] Failed to open /config.bak"));
-        DynamicJsonDocument errorDoc(128);
+        JsonDocument errorDoc;
         errorDoc[F("error")] = "Failed to open backup file.";
         String response;
         serializeJson(errorDoc, response);
@@ -880,7 +866,7 @@ void setupWebServer() {
       if (!dst) {
         src.close();
         Serial.println(F("[WEBSERVER] Failed to open /config.json for writing"));
-        DynamicJsonDocument errorDoc(128);
+        JsonDocument errorDoc;
         errorDoc[F("error")] = "Failed to open config for writing.";
         String response;
         serializeJson(errorDoc, response);
@@ -894,7 +880,7 @@ void setupWebServer() {
       src.close();
       dst.close();
 
-      DynamicJsonDocument okDoc(128);
+      JsonDocument okDoc;
       okDoc[F("message")] = "✅ Backup restored! Device will now reboot.";
       String response;
       serializeJson(okDoc, response);
@@ -910,7 +896,7 @@ void setupWebServer() {
 
     } else {
       Serial.println(F("[WEBSERVER] No backup found"));
-      DynamicJsonDocument errorDoc(128);
+      JsonDocument errorDoc;
       errorDoc[F("error")] = "No backup found.";
       String response;
       serializeJson(errorDoc, response);
@@ -946,22 +932,6 @@ void setupWebServer() {
   });
   
   // Add new API endpoint to fetch Netatmo devices
-  // Add a test endpoint to trigger a crash for testing
-  server.on("/crash", HTTP_GET, [](AsyncWebServerRequest *request){
-    Serial.println(F("[WEBSERVER] Request: /crash"));
-    
-    // Send response before crashing
-    request->send(200, "text/html", "<html><body><h1>Triggering crash...</h1><p>The device will crash now. Check the debug page after restart.</p></body></html>");
-    
-    // Delay to allow the response to be sent
-    delay(1000);
-    
-    // Trigger a crash by dereferencing a null pointer
-    Serial.println(F("[WEBSERVER] Triggering crash..."));
-    char* p = NULL;
-    *p = 'x';
-  });
-  
   server.on("/api/netatmo/devices", HTTP_GET, [](AsyncWebServerRequest *request){
     Serial.println(F("[WEBSERVER] Request: /api/netatmo/devices"));
     String devices = fetchNetatmoDevices();
@@ -1086,7 +1056,7 @@ void setupWebServer() {
     
     bool success = LittleFS.format();
     
-    DynamicJsonDocument doc(128);
+    JsonDocument doc;
     doc[F("format_success")] = success;
     
     if (success) {
@@ -1094,7 +1064,7 @@ void setupWebServer() {
       
       // Create default config
       if (LittleFS.begin()) {
-        DynamicJsonDocument configDoc(512);
+        JsonDocument configDoc;
         configDoc[F("ssid")] = "";
         configDoc[F("password")] = "";
         configDoc[F("mdnsHostname")] = "esptime";
@@ -1127,19 +1097,6 @@ void setupWebServer() {
   // Setup Netatmo save settings handler
   setupSaveSettingsHandler();
   
-  // Add handler for netatmo-devices.js
-  server.on("/netatmo-devices.js", HTTP_GET, [](AsyncWebServerRequest *request){
-    Serial.println(F("[WEBSERVER] Request: /netatmo-devices.js"));
-    
-    // Check if we should handle this request
-    if (!shouldHandleWebRequest()) {
-      request->send(503, "text/plain", "Server busy, try again later");
-      return;
-    }
-    
-    request->send(LittleFS, "/netatmo-devices.js", "application/javascript");
-  });
-  
   // Add a generic static file handler for any other files
   // Set up optimized handlers for memory-intensive requests
   setupOptimizedHandlers();
@@ -1169,14 +1126,8 @@ String getNetatmoToken() {
   }
   
   // Check if we have a refresh token
-  bool useRefreshToken = strlen(netatmoRefreshToken) > 0;
-  Serial.print(F("[NETATMO] Using refresh token: "));
-  Serial.println(useRefreshToken ? "Yes" : "No");
-  
-  // If no refresh token, check if we have username/password
-  if (!useRefreshToken && (strlen(netatmoClientId) == 0 || strlen(netatmoClientSecret) == 0 || 
-      strlen(netatmoUsername) == 0 || strlen(netatmoPassword) == 0)) {
-    Serial.println(F("[NETATMO] Skipped: Missing Netatmo credentials"));
+  if (strlen(netatmoRefreshToken) == 0) {
+    Serial.println(F("[NETATMO] Skipped: No refresh token available (use OAuth2 flow to authenticate)"));
     return "";
   }
   
@@ -1208,36 +1159,13 @@ String getNetatmoToken() {
     
     String postData;
     
-    if (useRefreshToken) {
-      // Use refresh token flow
-      postData = "grant_type=refresh_token&refresh_token=";
-      postData += netatmoRefreshToken;
-      postData += "&client_id=";
-      postData += netatmoClientId;
-      postData += "&client_secret=";
-      postData += netatmoClientSecret;
-      // No scope parameter for refresh token requests
-    } else {
-      // Use password flow
-      postData = "grant_type=password&client_id=";
-      postData += netatmoClientId;
-      postData += "&client_secret=";
-      postData += netatmoClientSecret;
-      postData += "&username=";
-      postData += netatmoUsername;
-      postData += "&password=";
-      postData += netatmoPassword;
-      
-      // Check for special characters in credentials that might need URL encoding
-      if (postData.indexOf('@') != -1 || postData.indexOf('+') != -1 || 
-          postData.indexOf('%') != -1 || postData.indexOf('&') != -1 ||
-          postData.indexOf('=') != -1 || postData.indexOf(' ') != -1) {
-        Serial.println(F("[NETATMO] WARNING: Credentials contain special characters that might need URL encoding"));
-      }
-      
-      // Only add scope parameter for password grant
-      postData += "&scope=read_station read_thermostat read_homecoach";
-    }
+    // Use refresh token flow
+    postData = "grant_type=refresh_token&refresh_token=";
+    postData += netatmoRefreshToken;
+    postData += "&client_id=";
+    postData += netatmoClientId;
+    postData += "&client_secret=";
+    postData += netatmoClientSecret;
     
     Serial.print(F("[NETATMO] POST data: "));
     // Print a redacted version of the POST data for debugging
@@ -1316,17 +1244,17 @@ String getNetatmoToken() {
       Serial.println(F("[NETATMO] Response received:"));
       Serial.println(payload);
       
-      DynamicJsonDocument doc(2048); // Increased from 1024 to 2048
+      JsonDocument doc; // Increased from 1024 to 2048
       DeserializationError error = deserializeJson(doc, payload);
       
       if (!error) {
-        if (doc.containsKey("access_token")) {
+        if (doc["access_token"].is<JsonVariant>()) {
           token = doc["access_token"].as<String>();
           
           // Store the tokens for future use
           strlcpy(netatmoAccessToken, token.c_str(), sizeof(netatmoAccessToken));
           
-          if (doc.containsKey("refresh_token")) {
+          if (doc["refresh_token"].is<JsonVariant>()) {
             String refreshToken = doc["refresh_token"].as<String>();
             strlcpy(netatmoRefreshToken, refreshToken.c_str(), sizeof(netatmoRefreshToken));
             
@@ -1372,11 +1300,11 @@ String getNetatmoToken() {
       Serial.println(errorPayload);
       
       // Try to parse the error message
-      DynamicJsonDocument errorDoc(2048); // Increased from 1024 to 2048
+      JsonDocument errorDoc; // Increased from 1024 to 2048
       DeserializationError errorParseError = deserializeJson(errorDoc, errorPayload);
-      if (!errorParseError && errorDoc.containsKey("error")) {
+      if (!errorParseError && errorDoc["error"].is<JsonVariant>()) {
         String errorType = errorDoc["error"].as<String>();
-        String errorMessage = errorDoc.containsKey("error_description") ? 
+        String errorMessage = errorDoc["error_description"].is<JsonVariant>() ? 
                              errorDoc["error_description"].as<String>() : "Unknown error";
         
         Serial.print(F("[NETATMO] Error type: "));
@@ -1398,21 +1326,19 @@ String getNetatmoToken() {
         handleBlockedRequest(errorPayload);
       }
       
-      // If using an existing refresh token and it failed, clear it
-      if (useRefreshToken) {
-        // Check if it's a connection error (httpCode <= 0)
-        if (httpCode <= 0) {
-          Serial.println(F("[NETATMO] Connection error, not clearing refresh token"));
-          refreshTokenConnectionFailed = true;
-          Serial.println(F("[NETATMO] Setting refreshTokenConnectionFailed flag"));
-        } else {
-          Serial.println(F("[NETATMO] Refresh token might be expired, clearing it"));
-          netatmoRefreshToken[0] = '\0';
-          netatmoAccessToken[0] = '\0';
-          saveTokensToConfig();
-          refreshTokenAuthFailed = true;
-          Serial.println(F("[NETATMO] Setting refreshTokenAuthFailed flag"));
-        }
+      // Handle refresh token failure
+      // Check if it's a connection error (httpCode <= 0)
+      if (httpCode <= 0) {
+        Serial.println(F("[NETATMO] Connection error, not clearing refresh token"));
+        refreshTokenConnectionFailed = true;
+        netatmoStatus = NETATMO_CONN_FAIL;
+      } else {
+        Serial.println(F("[NETATMO] Refresh token might be expired, clearing it"));
+        netatmoRefreshToken[0] = '\0';
+        netatmoAccessToken[0] = '\0';
+        saveTokensToConfig();
+        refreshTokenAuthFailed = true;
+        netatmoStatus = NETATMO_AUTH_FAIL;
       }
     }
     
@@ -1478,7 +1404,7 @@ void saveTokensToConfig() {
   yield(); // Feed the watchdog
   
   // Create a smaller JSON document just for tokens
-  DynamicJsonDocument tokenDoc(512);
+  JsonDocument tokenDoc;
   
   // Update only the Netatmo tokens in the JSON document
   tokenDoc["netatmoAccessToken"] = netatmoAccessToken;
@@ -1524,7 +1450,7 @@ void saveTokensToConfig() {
   
   // Also update the main config with other Netatmo settings (not tokens)
   // First, read the existing config file to preserve all settings
-  DynamicJsonDocument doc(2048);
+  JsonDocument doc;
   bool configExists = false;
   
   if (LittleFS.exists("/config.json")) {
@@ -1617,6 +1543,7 @@ void fetchOutdoorTemperature(bool roundToInteger = true) {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println(F("[NETATMO] Skipped: WiFi not connected"));
     outdoorTempAvailable = false;
+    netatmoStatus = NETATMO_CONN_FAIL;
     return;
   }
   
@@ -1629,6 +1556,7 @@ void fetchOutdoorTemperature(bool roundToInteger = true) {
     Serial.print(netatmoModuleId);
     Serial.println(F("'"));
     outdoorTempAvailable = false;
+    netatmoStatus = NETATMO_NO_CONFIG;
     return;
   }
   
@@ -1637,6 +1565,7 @@ void fetchOutdoorTemperature(bool roundToInteger = true) {
   if (token.length() == 0) {
     Serial.println(F("[NETATMO] Skipped: No access token available"));
     outdoorTempAvailable = false;
+    netatmoStatus = NETATMO_NO_TOKEN;
     return;
   }
   
@@ -1676,7 +1605,7 @@ void fetchOutdoorTemperature(bool roundToInteger = true) {
       Serial.println(F("[NETATMO] Response received:"));
       Serial.println(payload);
       
-      DynamicJsonDocument doc(8192); // Increased from 4096 to 8192
+      JsonDocument doc; // Increased from 4096 to 8192
       
       if (parseNetatmoJson(payload, doc)) {
         // Navigate through the JSON to find the outdoor module
@@ -1704,7 +1633,7 @@ void fetchOutdoorTemperature(bool roundToInteger = true) {
               // Get indoor temperature from the main device
               JsonObject device_dashboard_data = device["dashboard_data"];
               
-              if (device_dashboard_data.containsKey("Temperature")) {
+              if (device_dashboard_data["Temperature"].is<JsonVariant>()) {
                 float indoorTempValue = device_dashboard_data["Temperature"];
                 
                 Serial.print(F("[NETATMO] Indoor temperature from main device: "));
@@ -1739,7 +1668,7 @@ void fetchOutdoorTemperature(bool roundToInteger = true) {
                 
                 JsonObject dashboard_data = module["dashboard_data"];
                 
-                if (dashboard_data.containsKey("Temperature")) {
+                if (dashboard_data["Temperature"].is<JsonVariant>()) {
                   float temp = dashboard_data["Temperature"];
                   
                   // Debug the raw temperature value
@@ -1753,6 +1682,7 @@ void fetchOutdoorTemperature(bool roundToInteger = true) {
                   Serial.print(F("[NETATMO] Outdoor temperature: "));
                   Serial.println(outdoorTemp);
                   outdoorTempAvailable = true;
+                  netatmoStatus = NETATMO_OK;
                 } else {
                   Serial.println(F("[NETATMO] Temperature data not found in dashboard_data"));
                   Serial.println(F("[NETATMO] Available dashboard_data fields:"));
@@ -1771,7 +1701,7 @@ void fetchOutdoorTemperature(bool roundToInteger = true) {
                 
                 JsonObject dashboard_data = module["dashboard_data"];
                 
-                if (dashboard_data.containsKey("Temperature")) {
+                if (dashboard_data["Temperature"].is<JsonVariant>()) {
                   float indoorTempValue = dashboard_data["Temperature"];
                   
                   Serial.print(F("[NETATMO] Indoor temperature from module: "));
@@ -1824,11 +1754,11 @@ void fetchOutdoorTemperature(bool roundToInteger = true) {
       Serial.println(errorPayload);
       
       // Try to parse the error message
-      DynamicJsonDocument errorDoc(1024);
+      JsonDocument errorDoc;
       DeserializationError errorParseError = deserializeJson(errorDoc, errorPayload);
-      if (!errorParseError && errorDoc.containsKey("error")) {
+      if (!errorParseError && errorDoc["error"].is<JsonVariant>()) {
         String errorType = errorDoc["error"].as<String>();
-        String errorMessage = errorDoc.containsKey("error_description") ? 
+        String errorMessage = errorDoc["error_description"].is<JsonVariant>() ? 
                              errorDoc["error_description"].as<String>() : "Unknown error";
         
         Serial.print(F("[NETATMO] Error type: "));
@@ -1856,6 +1786,11 @@ void fetchOutdoorTemperature(bool roundToInteger = true) {
           Serial.println(F("[NETATMO] 403/401 error - token expired"));
           forceNetatmoTokenRefresh();  // Force token refresh on next API call
         }
+        netatmoStatus = NETATMO_AUTH_FAIL;
+      } else if (httpCode <= 0) {
+        netatmoStatus = NETATMO_CONN_FAIL;
+      } else {
+        netatmoStatus = NETATMO_API_ERROR;
       }
       
       outdoorTempAvailable = false;
@@ -1865,6 +1800,7 @@ void fetchOutdoorTemperature(bool roundToInteger = true) {
   } else {
     Serial.println(F("[NETATMO] Unable to connect to Netatmo API"));
     outdoorTempAvailable = false;
+    netatmoStatus = NETATMO_CONN_FAIL;
   }
 }
 
@@ -1907,13 +1843,9 @@ void updateTemperatures() {
       indoorTempAvailable = true;
       Serial.println(F("[TEMP] Using Netatmo as fallback for indoor temperature"));
     }
-  } else if (tempSource == 1) { // Netatmo primary
-    // If Netatmo indoor temperature is not available, try local sensor as fallback
+  } else if (tempSource == 1) { // Netatmo primary, no local fallback
     if (!netatmoIndoorTempAvailable) {
-      readIndoorTemperature(shouldRound);
-      if (indoorTempAvailable) {
-        Serial.println(F("[TEMP] Using local sensor as fallback for indoor temperature"));
-      }
+      indoorTempAvailable = false;
     }
   } else if (tempSource == 2) { // Netatmo only
     // Only use Netatmo for indoor temperature
@@ -1982,6 +1914,16 @@ void loop() {
     return; // Just in case restart doesn't happen immediately
   }
   
+  // WiFi reconnection check (skip in AP mode)
+  static unsigned long lastWiFiReconnectAttempt = 0;
+  if (!isAPMode && WiFi.status() != WL_CONNECTED) {
+    if (millis() - lastWiFiReconnectAttempt > 30000) {
+      lastWiFiReconnectAttempt = millis();
+      Serial.println(F("[WIFI] Connection lost, attempting reconnect..."));
+      WiFi.reconnect();
+    }
+  }
+
   // Update mDNS responder
   if (WiFi.status() == WL_CONNECTED && !isAPMode) {
     MDNS.update();
@@ -2174,43 +2116,17 @@ void loop() {
       P.print(timeString);
     }
   } else { // Temperature mode
-    if (refreshTokenConnectionFailed) {
-      // Display "conn" to indicate connection failure
-      P.print("conn");
-      refreshTokenConnectionFailed = false; // Reset the flag after displaying
-      
-      // If this is the first time showing the conn message, log it
-      static bool connMessageShown = false;
-      if (!connMessageShown) {
-        Serial.println(F("[DISPLAY] Showing 'conn' message due to connection failure"));
-        connMessageShown = true;
-      }
-    } else if (refreshTokenAuthFailed) {
-      // Display "auth" to indicate authentication failure
-      P.print("auth");
-      
-      // If this is the first time showing the auth message, log it
-      static bool authMessageShown = false;
-      if (!authMessageShown) {
-        Serial.println(F("[DISPLAY] Showing 'auth' message due to refresh token failure"));
-        authMessageShown = true;
-      }
-    } else if (indoorTempAvailable || outdoorTempAvailable) {
+    if (indoorTempAvailable || outdoorTempAvailable) {
       // --- Temperature display string ---
       String tempDisplay;
       
       if (showIndoorTemp && indoorTempAvailable && showOutdoorTemp && outdoorTempAvailable) {
-        // Show both temperatures with a separator that blinks but maintains alignment
-        // Use a custom invisible separator with the same width as the vertical bar
         tempDisplay = indoorTemp + (indicatorVisible ? "|" : "}") + outdoorTemp;
       } else if (showIndoorTemp && indoorTempAvailable) {
-        // Show only indoor temperature with lowercase i that blinks
         tempDisplay = (indicatorVisible ? "i " : "  ") + indoorTemp + tempSymbol;
       } else if (showOutdoorTemp && outdoorTempAvailable) {
-        // Show only outdoor temperature with lowercase o that blinks
         tempDisplay = (indicatorVisible ? "o " : "  ") + outdoorTemp + tempSymbol;
       } else {
-        // Fallback to clock if no temperatures available
         String timeString = formattedTime;
         if (!colonVisible) timeString.replace(":", " ");
         P.print(timeString);
@@ -2219,6 +2135,16 @@ void loop() {
       
       P.print(tempDisplay.c_str());
       tempWasAvailable = true;
+    } else if (netatmoStatus != NETATMO_OK) {
+      // Show short status code when Netatmo has issues and no temp data
+      switch (netatmoStatus) {
+        case NETATMO_NO_TOKEN:
+        case NETATMO_AUTH_FAIL: P.print("auth"); break;
+        case NETATMO_CONN_FAIL: P.print("conn"); break;
+        case NETATMO_NO_CONFIG: P.print("conf"); break;
+        case NETATMO_API_ERROR: P.print("err");  break;
+        default: break;
+      }
     } else {
       if (tempWasAvailable) {
         Serial.println(F("[DISPLAY] Temperatures not available, showing clock..."));
@@ -2929,7 +2855,7 @@ bool restoreConfig() {
   backupFile.close();
   
   // Validate the backup data
-  DynamicJsonDocument doc(2048);
+  JsonDocument doc;
   DeserializationError err = deserializeJson(doc, backupData);
   
   if (err) {
@@ -3045,7 +2971,7 @@ bool checkAndRepairConfig() {
   yield(); // Feed the watchdog
   
   // Validate JSON
-  DynamicJsonDocument doc(2048);
+  JsonDocument doc;
   DeserializationError err = deserializeJson(doc, configData);
   
   yield(); // Feed the watchdog
@@ -3204,155 +3130,6 @@ String getCrashInfoHtml() {
   html += "<p><strong>Free Sketch Space:</strong> " + String(ESP.getFreeSketchSpace() / 1024) + " KB</p>";
   
   return html;
-}
-
-// Content from debugNetatmoAuth.ino
-
-// Function to debug Netatmo authentication issues
-void debugNetatmoAuth() {
-  Serial.println(F("\n[NETATMO DEBUG] Starting authentication debug..."));
-  
-  // Check WiFi connection
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println(F("[NETATMO DEBUG] ERROR: WiFi not connected"));
-    return;
-  } else {
-    Serial.print(F("[NETATMO DEBUG] WiFi connected, IP: "));
-    Serial.println(WiFi.localIP());
-  }
-  
-  // Check credentials
-  Serial.println(F("[NETATMO DEBUG] Checking credentials:"));
-  
-  Serial.print(F("[NETATMO DEBUG] Client ID length: "));
-  Serial.println(strlen(netatmoClientId));
-  if (strlen(netatmoClientId) < 10) {
-    Serial.println(F("[NETATMO DEBUG] ERROR: Client ID missing or too short"));
-  }
-  
-  Serial.print(F("[NETATMO DEBUG] Client Secret length: "));
-  Serial.println(strlen(netatmoClientSecret));
-  if (strlen(netatmoClientSecret) < 10) {
-    Serial.println(F("[NETATMO DEBUG] ERROR: Client Secret missing or too short"));
-  }
-  
-  Serial.print(F("[NETATMO DEBUG] Username length: "));
-  Serial.println(strlen(netatmoUsername));
-  if (strlen(netatmoUsername) < 5) {
-    Serial.println(F("[NETATMO DEBUG] ERROR: Username missing or too short"));
-  }
-  
-  Serial.print(F("[NETATMO DEBUG] Password length: "));
-  Serial.println(strlen(netatmoPassword));
-  if (strlen(netatmoPassword) < 5) {
-    Serial.println(F("[NETATMO DEBUG] ERROR: Password missing or too short"));
-  }
-  
-  // Try direct token request with verbose logging
-  Serial.println(F("[NETATMO DEBUG] Attempting direct token request..."));
-  
-  std::unique_ptr<BearSSL::WiFiClientSecure> client(new BearSSL::WiFiClientSecure);
-  client->setInsecure(); // Skip certificate validation
-  
-  HTTPClient https;
-  
-  if (https.begin(*client, "https://api.netatmo.com/oauth2/token")) {
-    https.addHeader("Content-Type", "application/x-www-form-urlencoded");
-    https.addHeader("Accept", "application/json");
-    https.addHeader("User-Agent", "ESPTimeCast/1.0");
-    
-    // Use password flow
-    String postData = "grant_type=password&client_id=";
-    postData += netatmoClientId;
-    postData += "&client_secret=";
-    postData += netatmoClientSecret;
-    postData += "&username=";
-    postData += netatmoUsername;
-    postData += "&password=";
-    postData += netatmoPassword;
-    postData += "&scope=read_station read_thermostat read_homecoach";
-    
-    Serial.println(F("[NETATMO DEBUG] Sending POST request..."));
-    int httpCode = https.POST(postData);
-    
-    Serial.print(F("[NETATMO DEBUG] HTTP response code: "));
-    Serial.println(httpCode);
-    
-    String payload = https.getString();
-    Serial.println(F("[NETATMO DEBUG] Response:"));
-    Serial.println(payload);
-    
-    if (httpCode == HTTP_CODE_OK) {
-      Serial.println(F("[NETATMO DEBUG] SUCCESS: Token request successful"));
-      
-      // Try to parse the response
-      DynamicJsonDocument doc(2048);
-      DeserializationError error = deserializeJson(doc, payload);
-      
-      if (!error) {
-        if (doc.containsKey("access_token")) {
-          String token = doc["access_token"].as<String>();
-          Serial.print(F("[NETATMO DEBUG] Access token received (length: "));
-          Serial.print(token.length());
-          Serial.println(F(")"));
-          
-          // Store the tokens
-          strlcpy(netatmoAccessToken, token.c_str(), sizeof(netatmoAccessToken));
-          
-          if (doc.containsKey("refresh_token")) {
-            String refreshToken = doc["refresh_token"].as<String>();
-            Serial.print(F("[NETATMO DEBUG] Refresh token received (length: "));
-            Serial.print(refreshToken.length());
-            Serial.println(F(")"));
-            
-            strlcpy(netatmoRefreshToken, refreshToken.c_str(), sizeof(netatmoRefreshToken));
-            
-            // Save the tokens to config.json
-            saveTokensToConfig();
-            Serial.println(F("[NETATMO DEBUG] Tokens saved to config"));
-          } else {
-            Serial.println(F("[NETATMO DEBUG] WARNING: No refresh token in response"));
-          }
-        } else {
-          Serial.println(F("[NETATMO DEBUG] ERROR: No access token in response"));
-        }
-      } else {
-        Serial.print(F("[NETATMO DEBUG] ERROR: JSON parse error: "));
-        Serial.println(error.c_str());
-      }
-    } else {
-      Serial.println(F("[NETATMO DEBUG] ERROR: Token request failed"));
-      
-      // Try to parse the error
-      DynamicJsonDocument errorDoc(2048);
-      DeserializationError errorParseError = deserializeJson(errorDoc, payload);
-      
-      if (!errorParseError && errorDoc.containsKey("error")) {
-        String errorType = errorDoc["error"].as<String>();
-        String errorMessage = errorDoc.containsKey("error_description") ? 
-                             errorDoc["error_description"].as<String>() : "Unknown error";
-        
-        Serial.print(F("[NETATMO DEBUG] Error type: "));
-        Serial.println(errorType);
-        Serial.print(F("[NETATMO DEBUG] Error message: "));
-        Serial.println(errorMessage);
-        
-        if (errorType == "invalid_client") {
-          Serial.println(F("[NETATMO DEBUG] ERROR: Invalid client ID or client secret"));
-        } else if (errorType == "invalid_grant") {
-          Serial.println(F("[NETATMO DEBUG] ERROR: Invalid username or password"));
-        } else if (errorType == "invalid_scope") {
-          Serial.println(F("[NETATMO DEBUG] ERROR: Invalid scope requested"));
-        }
-      }
-    }
-    
-    https.end();
-  } else {
-    Serial.println(F("[NETATMO DEBUG] ERROR: Failed to connect to Netatmo API"));
-  }
-  
-  Serial.println(F("[NETATMO DEBUG] Authentication debug complete"));
 }
 
 // Content from debugNetatmoToken.ino
@@ -3685,8 +3462,6 @@ void processProxyRequest() {
 
 // Content from deferredSettings.ino
 
-#include "saveSettingsState.h"
-
 // Global variables for deferred operations
 bool settingsSavePending = false;
 bool apiCallInProgress = false;
@@ -3725,7 +3500,7 @@ void processSettingsSave() {
   yield(); // Feed the watchdog
   
   // First, read the existing config file to preserve all settings
-  DynamicJsonDocument doc(2048);
+  JsonDocument doc;
   bool configExists = false;
   
   if (LittleFS.exists("/config.json")) {
@@ -3994,7 +3769,7 @@ void fetchNetatmoIndoorTemperature() {
       Serial.println(F("[NETATMO] Response:"));
       Serial.println(payload);
       
-      DynamicJsonDocument doc(8192); // Increased from 4096 to 8192
+      JsonDocument doc; // Increased from 4096 to 8192
       
       if (parseNetatmoJson(payload, doc)) {
         // Navigate through the JSON to find the indoor module
@@ -4022,7 +3797,7 @@ void fetchNetatmoIndoorTemperature() {
               
               JsonObject dashboard_data = device["dashboard_data"];
               
-              if (dashboard_data.containsKey("Temperature")) {
+              if (dashboard_data["Temperature"].is<JsonVariant>()) {
                 float temp = dashboard_data["Temperature"];
                 netatmoIndoorTemp = temp;
                 netatmoIndoorTempAvailable = true;
@@ -4062,7 +3837,7 @@ void fetchNetatmoIndoorTemperature() {
                   
                   JsonObject dashboard_data = module["dashboard_data"];
                   
-                  if (dashboard_data.containsKey("Temperature")) {
+                  if (dashboard_data["Temperature"].is<JsonVariant>()) {
                     float temp = dashboard_data["Temperature"];
                     netatmoIndoorTemp = temp;
                     netatmoIndoorTempAvailable = true;
@@ -4110,11 +3885,11 @@ void fetchNetatmoIndoorTemperature() {
       Serial.println(errorPayload);
       
       // Try to parse the error message
-      DynamicJsonDocument errorDoc(1024);
+      JsonDocument errorDoc;
       DeserializationError errorParseError = deserializeJson(errorDoc, errorPayload);
-      if (!errorParseError && errorDoc.containsKey("error")) {
+      if (!errorParseError && errorDoc["error"].is<JsonVariant>()) {
         String errorType = errorDoc["error"].as<String>();
-        String errorMessage = errorDoc.containsKey("error_description") ? 
+        String errorMessage = errorDoc["error_description"].is<JsonVariant>() ? 
                              errorDoc["error_description"].as<String>() : "Unknown error";
         
         Serial.print(F("[NETATMO] Error type: "));
@@ -4377,42 +4152,17 @@ void logApiRequest(const char* url, const char* token) {
 
 // Function to clean up memory after API calls
 void cleanupAfterAPICall() {
-  Serial.println(F("[MEMORY] Cleaning up after API call"));
-  
-  // Force garbage collection
-  forceGarbageCollection();
-  
-  // Defragment heap
-  defragmentHeap();
-  
-  // Print memory stats
-  printMemoryStats();
+  yield();
 }
 
 // Function to clean up memory before API calls
 void prepareForAPICall() {
-  Serial.println(F("[MEMORY] Preparing for API call"));
-  
-  // Defragment heap
-  defragmentHeap();
-  
-  // Print memory stats
-  printMemoryStats();
+  yield();
 }
 
 // Function to release unused memory
 void releaseUnusedMemory() {
-  // Allocate and free small blocks to trigger ESP8266 memory manager
-  for (int i = 0; i < 10; i++) {
-    void* p = malloc(128);
-    if (p) {
-      free(p);
-    }
-    yield();
-  }
-  
-  // Reset heap to consolidate free blocks
-  ESP.resetHeap();
+  yield();
 }
 
 // Content from memoryDefrag.ino
@@ -4439,81 +4189,19 @@ void printMemoryStats() {
   Serial.println(F(" bytes"));
 }
 
-// Function to defragment the heap with safer yield handling
+// Heap "defragmentation" is not effective on ESP8266's allocator.
+// Replaced with a simple yield to feed the watchdog.
 void defragmentHeap() {
-  Serial.println(F("[MEMORY] Starting heap defragmentation"));
-  printMemoryStats();
-  
-  // Get current free heap
-  uint32_t freeHeap = ESP.getFreeHeap();
-  
-  // Try to allocate a large block (70% of free heap) - reduced from 80% to be safer
-  uint32_t blockSize = (freeHeap * 70) / 100;
-  char* block = nullptr;
-  
-  // Try to allocate with decreasing sizes
-  while (blockSize > 1024 && block == nullptr) {
-    block = (char*)malloc(blockSize);
-    if (block == nullptr) {
-      blockSize = (blockSize * 90) / 100; // Reduce by 10%
-    }
-    
-    // Use delay instead of yield to avoid potential yield-related crashes
-    delay(1);
-  }
-  
-  // If allocation succeeded, fill with pattern and free
-  if (block != nullptr) {
-    // Fill with pattern to ensure physical allocation
-    // Use smaller chunks to avoid blocking for too long
-    const size_t chunkSize = 1024;
-    for (size_t i = 0; i < blockSize; i += chunkSize) {
-      size_t fillSize = min(chunkSize, blockSize - i);
-      memset(block + i, 0xAA, fillSize);
-      
-      // Use delay instead of yield
-      delay(1);
-    }
-    
-    free(block);
-    Serial.print(F("[MEMORY] Defragmented "));
-    Serial.print(blockSize);
-    Serial.println(F(" bytes"));
-  } else {
-    Serial.println(F("[MEMORY] Failed to allocate block for defragmentation"));
-  }
-  
-  // Force garbage collection with safer approach
-  safeGarbageCollection();
-  
-  Serial.println(F("[MEMORY] Heap defragmentation complete"));
-  printMemoryStats();
+  yield();
 }
 
 // Function to force garbage collection with safer yield handling
 void forceGarbageCollection() {
-  Serial.println(F("[MEMORY] Forcing garbage collection"));
-  ESP.resetHeap();
+  yield();
 }
 
-// Safe garbage collection function
 void safeGarbageCollection() {
-  Serial.println(F("[MEMORY] Safe garbage collection"));
-  
-  // Allocate and free small blocks with delays instead of yields
-  for (int i = 0; i < 5; i++) {
-    void* p = malloc(128);
-    if (p) {
-      // Touch the memory to ensure it's physically allocated
-      memset(p, 0, 128);
-      free(p);
-    }
-    // Use delay instead of yield
-    delay(5);
-  }
-  
-  // One final delay to allow system tasks
-  delay(10);
+  yield();
 }
 
 // Function to check if defragmentation is needed
@@ -4695,22 +4383,22 @@ bool parseNetatmoJson(String &payload, JsonDocument &doc) {
       Serial.println(F("[NETATMO] Memory error - trying to extract only essential data"));
       
       // Create a filter to only extract the parts we need
-      StaticJsonDocument<512> filter;
+      JsonDocument filter;
       
       // For station data
-      JsonObject filter_body = filter.createNestedObject("body");
-      JsonArray filter_devices = filter_body.createNestedArray("devices");
+      JsonObject filter_body = filter["body"].to<JsonObject>();
+      JsonArray filter_devices = filter_body["devices"].to<JsonArray>();
       
-      JsonObject device = filter_devices.createNestedObject();
+      JsonObject device = filter_devices.add<JsonObject>();
       device["_id"] = true;
       device["station_name"] = true;
       
-      JsonArray modules = device.createNestedArray("modules");
-      JsonObject module = modules.createNestedObject();
+      JsonArray modules = device["modules"].to<JsonArray>();
+      JsonObject module = modules.add<JsonObject>();
       module["_id"] = true;
       module["module_name"] = true;
       
-      JsonObject dashboard = module.createNestedObject("dashboard_data");
+      JsonObject dashboard = module["dashboard_data"].to<JsonObject>();
       dashboard["Temperature"] = true;
       
       // Try parsing with the filter
@@ -4739,7 +4427,6 @@ bool parseNetatmoJson(String &payload, JsonDocument &doc) {
 
 // Content from saveSettingsHandler.ino
 
-#include "saveSettingsState.h"
 
 // Function to set up the save settings handler
 void setupSaveSettingsHandler() {
@@ -4823,11 +4510,6 @@ void setupSaveSettingsHandler() {
     Serial.println(prioritizeNetatmoIndoor ? "true" : "false");
   });
   
-  // Keep the original endpoint for compatibility, but make it do nothing
-  server.on("/api/netatmo/save-settings", HTTP_POST, [](AsyncWebServerRequest *request) {
-    Serial.println(F("[NETATMO] Handling original save settings request"));
-    request->send(200, "application/json", "{\"success\":false,\"message\":\"Please use the simple endpoint\"}");
-  });
 }
 
 // Content from setupNetatmoHandler.ino
@@ -4995,11 +4677,13 @@ bool refreshNetatmoToken() {
       netatmoAccessToken[0] = '\0';
       saveTokensToConfig();
       refreshTokenAuthFailed = true;
+      netatmoStatus = NETATMO_AUTH_FAIL;
       Serial.println(F("[NETATMO] Setting refreshTokenAuthFailed flag"));
     } else if (httpCode <= 0) {
       // This is a connection error
       Serial.println(F("[NETATMO] Connection error, not clearing refresh token"));
       refreshTokenConnectionFailed = true;
+      netatmoStatus = NETATMO_CONN_FAIL;
       Serial.println(F("[NETATMO] Setting refreshTokenConnectionFailed flag"));
     }
     
@@ -5014,7 +4698,7 @@ bool refreshNetatmoToken() {
   https.end();
   
   // Parse the response with a larger JSON document size
-  DynamicJsonDocument doc(2048);
+  JsonDocument doc;
   DeserializationError error = deserializeJson(doc, response);
   
   if (error) {
@@ -5024,7 +4708,7 @@ bool refreshNetatmoToken() {
   }
   
   // Extract the tokens
-  if (!doc.containsKey("access_token") || !doc.containsKey("refresh_token")) {
+  if (!doc["access_token"].is<JsonVariant>() || !doc["refresh_token"].is<JsonVariant>()) {
     Serial.println(F("[NETATMO] Missing tokens in response"));
     return false;
   }
@@ -5197,7 +4881,7 @@ void setupNetatmoHandler() {
     authUrl += "http%3A%2F%2F";
     authUrl += WiFi.localIP().toString();
     authUrl += "%2Fapi%2Fnetatmo%2Fcallback";
-    authUrl += "&scope=read_station%20read_homecoach%20access_camera%20read_presence%20read_thermostat&state=state&response_type=code";
+    authUrl += "&scope=read_station%20read_homecoach&state=state&response_type=code";
     
     Serial.print(F("[NETATMO] Auth URL: "));
     Serial.println(authUrl);
@@ -5289,30 +4973,6 @@ void setupNetatmoHandler() {
     request->send(200, "application/json", response);
   });
   
-  // Add a debug endpoint to check token status
-  server.on("/api/netatmo/token-status", HTTP_GET, [](AsyncWebServerRequest *request) {
-    Serial.println(F("[NETATMO] Handling token status request"));
-    
-    String response = "{";
-    response += "\"hasAccessToken\":" + String(strlen(netatmoAccessToken) > 0 ? "true" : "false");
-    response += ",\"hasRefreshToken\":" + String(strlen(netatmoRefreshToken) > 0 ? "true" : "false");
-    response += ",\"accessTokenLength\":" + String(strlen(netatmoAccessToken));
-    response += ",\"refreshTokenLength\":" + String(strlen(netatmoRefreshToken));
-    
-    // Add the first few characters of the tokens for verification
-    if (strlen(netatmoAccessToken) > 10) {
-      response += ",\"accessTokenPrefix\":\"" + String(netatmoAccessToken).substring(0, 10) + "...\"";
-    }
-    
-    if (strlen(netatmoRefreshToken) > 10) {
-      response += ",\"refreshTokenPrefix\":\"" + String(netatmoRefreshToken).substring(0, 10) + "...\"";
-    }
-    
-    response += "}";
-    
-    request->send(200, "application/json", response);
-  });
-  
   // Add a token refresh endpoint
   server.on("/api/netatmo/refresh-token", HTTP_GET, [](AsyncWebServerRequest *request) {
     Serial.println(F("[NETATMO] Handling token refresh request"));
@@ -5366,7 +5026,7 @@ void setupNetatmoHandler() {
     https.end();
     
     // Parse the response
-    StaticJsonDocument<384> doc;
+    JsonDocument doc;
     DeserializationError error = deserializeJson(doc, response);
     
     if (error) {
@@ -5377,7 +5037,7 @@ void setupNetatmoHandler() {
     }
     
     // Extract the tokens
-    if (!doc.containsKey("access_token") || !doc.containsKey("refresh_token")) {
+    if (!doc["access_token"].is<JsonVariant>() || !doc["refresh_token"].is<JsonVariant>()) {
       Serial.println(F("[NETATMO] Missing tokens in response"));
       request->send(500, "application/json", "{\"error\":\"Missing tokens in response\"}");
       return;
@@ -5791,7 +5451,7 @@ void processTokenExchange() {
   Serial.println(F("[NETATMO] Parsing response"));
   
   // Memory optimization: Use a smaller JSON buffer
-  StaticJsonDocument<384> doc;
+  JsonDocument doc;
   DeserializationError error = deserializeJson(doc, response);
   
   if (error) {
@@ -5802,7 +5462,7 @@ void processTokenExchange() {
   }
   
   // Extract the tokens
-  if (!doc.containsKey("access_token") || !doc.containsKey("refresh_token")) {
+  if (!doc["access_token"].is<JsonVariant>() || !doc["refresh_token"].is<JsonVariant>()) {
     Serial.println(F("[NETATMO] Missing tokens in response"));
     return;
   }
@@ -6168,20 +5828,20 @@ void processSaveCredentials() {
   if (LittleFS.begin()) {
     File f = LittleFS.open("/config.json", "r");
     if (f) {
-      DynamicJsonDocument doc(2048);
+      JsonDocument doc;
       DeserializationError err = deserializeJson(doc, f);
       f.close();
       
       if (!err) {
         Serial.print(F("[NETATMO] Verified netatmoClientId in config: "));
-        if (doc.containsKey("netatmoClientId")) {
+        if (doc["netatmoClientId"].is<JsonVariant>()) {
           Serial.println(doc["netatmoClientId"].as<String>());
         } else {
           Serial.println(F("(not found)"));
         }
         
         Serial.print(F("[NETATMO] Verified netatmoClientSecret in config: "));
-        if (doc.containsKey("netatmoClientSecret")) {
+        if (doc["netatmoClientSecret"].is<JsonVariant>()) {
           Serial.println(F("(present but not shown)"));
         } else {
           Serial.println(F("(not found)"));
@@ -6299,8 +5959,8 @@ void fetchStationsData() {
       
       // Try to refresh the token
       if (refreshNetatmoToken()) {
-        Serial.println(F("[NETATMO] Token refreshed, retrying request"));
-        fetchStationsData(); // Recursive call after token refresh
+        Serial.println(F("[NETATMO] Token refreshed, will retry on next loop"));
+        fetchStationsDataPending = true; // Deferred retry instead of recursive call
       } else {
         Serial.println(F("[NETATMO] Failed to refresh token"));
       }
@@ -6538,7 +6198,7 @@ void extractDeviceInfo() {
   Serial.println(F(" ms"));
   
   // Use a filter to extract only the data we need
-  StaticJsonDocument<256> filter;
+  JsonDocument filter;
   
   // Set up the filter to only extract the module IDs and types
   filter["body"]["homes"][0]["modules"][0]["id"] = true;
@@ -6547,7 +6207,7 @@ void extractDeviceInfo() {
   filter["body"]["homes"][0]["modules"][0]["bridge"] = true;
   
   // Use a smaller JSON document with the filter
-  DynamicJsonDocument doc(768); // Even smaller with filter
+  JsonDocument doc; // Even smaller with filter
   DeserializationError error = deserializeJson(doc, deviceFile, DeserializationOption::Filter(filter));
   deviceFile.close();
   
@@ -6561,7 +6221,7 @@ void extractDeviceInfo() {
   }
   
   // Check if we have a homesdata response
-  if (doc.containsKey("body") && doc["body"].containsKey("homes")) {
+  if (doc["body"].is<JsonVariant>() && doc["body"]["homes"].is<JsonVariant>()) {
     Serial.println(F("[NETATMO] Processing homesdata response"));
     
     JsonArray homes = doc["body"]["homes"];
@@ -6597,7 +6257,7 @@ void extractDeviceInfo() {
           // Find modules connected to this station
           for (JsonObject subModule : modules) {
             // Check if this module is connected to the main station
-            if (subModule.containsKey("bridge") && strcmp(subModule["bridge"], moduleId) == 0) {
+            if (subModule["bridge"].is<JsonVariant>() && strcmp(subModule["bridge"], moduleId) == 0) {
               const char* subModuleType = subModule["type"];
               const char* subModuleId = subModule["id"];
               const char* subModuleName = subModule["name"];
@@ -6629,7 +6289,7 @@ void extractDeviceInfo() {
     }
   } 
   // Check if we have a getstationsdata response
-  else if (doc.containsKey("body") && doc["body"].containsKey("devices")) {
+  else if (doc["body"].is<JsonVariant>() && doc["body"]["devices"].is<JsonVariant>()) {
     Serial.println(F("[NETATMO] Processing getstationsdata response"));
     
     JsonArray devices = doc["body"]["devices"];
