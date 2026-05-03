@@ -453,7 +453,7 @@ function loadConfig() {
       setCheckboxValue('prioritizeNetatmoIndoor', data.prioritizeNetatmoIndoor);
       
       // Update token status
-      updateTokenStatus(data.netatmoAccessToken);
+      updateTokenStatus();
     })
     .catch(error => {
       console.error('Error loading configuration:', error);
@@ -663,22 +663,27 @@ function setCheckboxValue(id, value) {
 }
 
 // Function to update token status
-function updateTokenStatus(accessToken) {
+function updateTokenStatus() {
   const tokenStatus = document.getElementById('tokenStatus');
   if (!tokenStatus) return;
   
-  if (accessToken && accessToken.length > 0) {
-    tokenStatus.textContent = 'Connected to Netatmo';
-    tokenStatus.className = 'token-status token-valid';
-    
-    const connectButton = document.getElementById('connectButton');
-    if (connectButton) {
-      connectButton.textContent = 'Reconnect to Netatmo';
-    }
-  } else {
-    tokenStatus.textContent = 'Not connected to Netatmo';
-    tokenStatus.className = 'token-status token-expired';
-  }
+  fetch('/api/netatmo/token-status')
+    .then(r => r.json())
+    .then(data => {
+      if (data.hasAccessToken) {
+        tokenStatus.textContent = 'Connected to Netatmo';
+        tokenStatus.className = 'token-status token-valid';
+        const connectButton = document.getElementById('connectButton');
+        if (connectButton) connectButton.textContent = 'Reconnect to Netatmo';
+      } else {
+        tokenStatus.textContent = 'Not connected to Netatmo';
+        tokenStatus.className = 'token-status token-expired';
+      }
+    })
+    .catch(() => {
+      tokenStatus.textContent = 'Not connected to Netatmo';
+      tokenStatus.className = 'token-status token-expired';
+    });
 }
 
 // Function to show status message
@@ -752,7 +757,6 @@ function hideStatus() {
             <option value="">Select Device...</option>
           </select>
         </div>
-        </div>
         
         <div class="form-group">
           <label for="netatmoModuleId">Outdoor Module:</label>
@@ -766,6 +770,10 @@ function hideStatus() {
           <select id="netatmoIndoorModuleId" name="netatmoIndoorModuleId" class="select-styled">
             <option value="none">Not mapped</option>
           </select>
+        </div>
+        
+        <div class="center">
+          <button type="button" onclick="fetchNetatmoDevices()" class="fetch-button">Refresh Devices</button>
         </div>
         
         <div class="toggle-container" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
@@ -789,16 +797,9 @@ function hideStatus() {
       
       <div style="display: flex; gap: 10px; margin-top: 20px;">
         <button type="submit">Save Settings</button>
-        <button type="button" onclick="fetchNetatmoDevices()">Refresh Devices</button>
-        <button type="button" onclick="debugNetatmoSettings()">Debug Settings</button>
+        <a href="/" style="display: inline-block; background-color: #555; color: white; padding: 0.75rem 1.5rem; border-radius: 4px; text-decoration: none; font-weight: 500;">Back to Main Settings</a>
       </div>
     </form>
-    
-    <div style="text-align: center; margin-top: 2rem;">
-      <a href="/" style="display: inline-block; background-color: var(--accent-color); color: white; padding: 0.5rem 1rem; border-radius: 4px; text-decoration: none; font-weight: 500;">
-        Back to Main Settings
-      </a>
-    </div>
   </div>
   
   <div class="footer">

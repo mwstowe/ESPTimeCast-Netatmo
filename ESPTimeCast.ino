@@ -44,7 +44,6 @@ void processTokenExchange();
 void processFetchDevices();
 void triggerNetatmoDevicesFetch();
 void processSettingsSave();
-String getNetatmoDeviceData();
 bool isNetatmoTokenValid();
 bool checkNetworkConnectivity();
 bool writeChunkedResponseToFile(WiFiClient* stream, File& file);
@@ -60,15 +59,10 @@ String getExceptionDetails(rst_info *resetInfo);
 void printMemoryStats();
 void defragmentHeap();
 void forceGarbageCollection();
+extern bool apiCallInProgress;
 bool shouldDefragment();
-int logDetailedApiRequest(HTTPClient &https, const String &apiUrl);
 bool isInvalidTokenError(const String &errorPayload);
-void setupHttpClientWithTimeout(HTTPClient &https);
-void listAllFiles();
 void enhanceApiResponse(AsyncWebServerRequest *request, const char* contentType, const String &payload);
-void sendFileWithEnhancedHeaders(AsyncWebServerRequest *request, const char* filePath, const char* contentType);
-void simpleNetatmoCall();
-void processSaveCredentials();
 
 // Function to create default config.json
 void createDefaultConfig() {
@@ -284,11 +278,7 @@ enum NetatmoStatus {
 NetatmoStatus netatmoStatus = NETATMO_OK;
 int lastNetatmoHttpCode = 0;
 
-// Flag to track if refresh token authentication has failed
-bool refreshTokenAuthFailed = false;
 
-// Flag to track if refresh token connection has failed
-bool refreshTokenConnectionFailed = false;
 
 // NTP Synchronization State Machine
 enum NtpState {
@@ -939,22 +929,6 @@ void setupWebServer() {
     request->send(200, "application/json", devices);
   });
   
-  server.on("/api/netatmo/simple", HTTP_GET, [](AsyncWebServerRequest *request){
-    Serial.println(F("[WEBSERVER] Request: /api/netatmo/simple"));
-    
-    // Check if we should handle this request
-    if (!shouldHandleWebRequest()) {
-      request->send(503, "text/plain", "Server busy, try again later");
-      return;
-    }
-    
-    // Call the simple Netatmo function
-    simpleNetatmoCall();
-    
-    // Send a response
-    request->send(200, "text/plain", "Simple Netatmo API call initiated. Check serial output for results.");
-  });
-  
   server.on("/debug", HTTP_GET, [](AsyncWebServerRequest *request){
     Serial.println(F("[WEBSERVER] Request: /debug"));
     
@@ -1202,7 +1176,6 @@ String getNetatmoToken() {
     Serial.println(F("===========================================\n"));
     
     // Defragment heap right before making the request - like successful API calls
-    Serial.println(F("[MEMORY] Final defragmentation before API call"));
     defragmentHeap();
     yield(); // Allow the watchdog to be fed
     
@@ -1264,7 +1237,6 @@ String getNetatmoToken() {
           }
           
           // Reset the auth failure flag since we got a valid token
-          refreshTokenAuthFailed = false;
           
           Serial.println(F("[NETATMO] Token obtained successfully"));
         } else {
@@ -1331,14 +1303,12 @@ String getNetatmoToken() {
       // Check if it's a connection error (httpCode <= 0)
       if (httpCode <= 0) {
         Serial.println(F("[NETATMO] Connection error, not clearing refresh token"));
-        refreshTokenConnectionFailed = true;
         netatmoStatus = NETATMO_CONN_FAIL;
       } else {
         Serial.println(F("[NETATMO] Refresh token might be expired, clearing it"));
         netatmoRefreshToken[0] = '\0';
         netatmoAccessToken[0] = '\0';
         saveTokensToConfig();
-        refreshTokenAuthFailed = true;
         netatmoStatus = NETATMO_AUTH_FAIL;
       }
     }
@@ -1388,11 +1358,9 @@ void saveTokensToConfig() {
   Serial.println(F("[CONFIG] Saving tokens to tokens.json"));
   
   // Add memory reporting
-  Serial.println(F("[MEMORY] Memory status before saving tokens:"));
-  printMemoryStats();
+
   
   // Defragment heap before saving tokens
-  Serial.println(F("[MEMORY] Defragmenting heap before saving tokens"));
   defragmentHeap();
   
   yield(); // Feed the watchdog
@@ -1524,8 +1492,6 @@ void saveTokensToConfig() {
   
   yield(); // Feed the watchdog
   
-  // Report memory status after saving
-  Serial.println(F("[MEMORY] Memory status after saving tokens:"));
   printMemoryStats();
 }
 
@@ -1533,8 +1499,6 @@ void saveTokensToConfig() {
 void fetchOutdoorTemperature(bool roundToInteger = true) {
   Serial.println(F("\n[NETATMO] Fetching outdoor temperature..."));
   
-  // Print and optimize memory before starting
-  printMemoryStats();
   
   if (shouldDefragment()) {
     Serial.println(F("[NETATMO] Memory fragmentation detected, defragmenting..."));
@@ -1570,8 +1534,6 @@ void fetchOutdoorTemperature(bool roundToInteger = true) {
     return;
   }
   
-  // Print memory after getting token
-  printMemoryStats();
   
   // Create a smaller buffer size for the SSL client
   // Use static to avoid stack allocation — BearSSL::WiFiClientSecure is large
@@ -1591,8 +1553,6 @@ void fetchOutdoorTemperature(bool roundToInteger = true) {
   Serial.print(F("[NETATMO] Using token: "));
   Serial.println(token.substring(0, 10) + "...");
   
-  // Print memory before beginning connection
-  printMemoryStats();
   
   if (https.begin(client, url)) {
     https.addHeader("Authorization", "Bearer " + token);
@@ -2175,7 +2135,6 @@ void loop() {
 }
 
 // External declarations for variables defined in other files
-extern bool apiCallInProgress;  // Flag to track API call status
 
 // Function to check if we should handle web requests
 bool shouldHandleWebRequest() {
@@ -2187,41 +2146,12 @@ bool shouldHandleWebRequest() {
   return true;
 }
 // Function declarations
-void processFetchStationsData();
-void processProxyRequest();
-void extractDeviceInfo();
-bool refreshNetatmoToken();
-void safeGarbageCollection();
 
 // External variable declarations
-extern char netatmoStationId[64];
-extern char netatmoModuleId[64];
-extern char netatmoIndoorModuleId[64];
 
-// Content from apiDebugger.ino
 
 // Function to log detailed API request and response information - simplified version
-int logDetailedApiRequest(HTTPClient &https, const String &apiUrl) {
-  Serial.println(F("[API] Making request to: ") + apiUrl);
-  
-  // Make the request and log the response
-  int httpCode = https.GET();
-  Serial.print(F("[API] Response code: "));
-  Serial.println(httpCode);
-  
-  // Only log the response body if there's an error
-  if (httpCode != HTTP_CODE_OK) {
-    String payload = https.getString();
-    Serial.println(F("[API] Error response:"));
-    Serial.println(payload);
-  } else {
-    Serial.println(F("[API] Request successful"));
-  }
-  
-  return httpCode;
-}
 
-// Content from checkNetatmoConfig.ino
 
 // Function to check Netatmo configuration
 void checkNetatmoConfig() {
@@ -2298,7 +2228,6 @@ void checkNetatmoConfig() {
   Serial.println();
 }
 
-// Content from chunkedTransfer.ino
 
 // Functions for handling chunked transfer encoding
 
@@ -2619,7 +2548,6 @@ bool writeChunkedResponseToFile(WiFiClient* stream, File& file) {
   return true;
 }
 
-// Content from cleanJsonWriter.ino
 
 // Function to write clean JSON to a file
 void writeCleanJsonToFile(const String &jsonString, const char* filePath) {
@@ -2776,7 +2704,6 @@ bool writeCleanJsonFromBuffer(const uint8_t* buffer, size_t bufferSize, File &fi
   return false; // Return false to indicate transfer is not complete
 }
 
-// Content from clearNetatmoTokens.ino
 
 // Function to clear Netatmo tokens
 void clearNetatmoTokens() {
@@ -2786,7 +2713,6 @@ void clearNetatmoTokens() {
   saveTokensToConfig();
 }
 
-// Content from configBackup.ino
 
 // Configuration backup and recovery functions
 
@@ -3031,7 +2957,6 @@ bool checkAndRepairConfig() {
   return true;
 }
 
-// Content from crashHandler.ino
 
 // Crash handler for ESP8266
 
@@ -3137,9 +3062,7 @@ String getCrashInfoHtml() {
   return html;
 }
 
-// Content from debugNetatmoToken.ino
 
-// Content from deferredProxy.ino
 
 // Global variables for deferred proxy request
 static bool proxyPending = false;
@@ -3158,9 +3081,7 @@ void processProxyRequest() {
   // Set API call in progress flag to prevent concurrent web requests
   apiCallInProgress = true;
   
-  // Print memory stats before processing
   Serial.println(F("[NETATMO] Memory stats before proxy request:"));
-  printMemoryStats();
   
   // Defragment heap if needed
   if (shouldDefragment()) {
@@ -3455,9 +3376,7 @@ void processProxyRequest() {
   // Reset API call in progress flag
   apiCallInProgress = false;
   
-  // Print memory stats after processing
   Serial.println(F("[NETATMO] Memory stats after proxy request:"));
-  printMemoryStats();
   
   unsigned long totalTime = millis() - startTime;
   Serial.print(F("[TIMING] Total request processing time: "));
@@ -3465,7 +3384,6 @@ void processProxyRequest() {
   Serial.println(F(" ms"));
 }
 
-// Content from deferredSettings.ino
 
 // Global variables for deferred operations
 bool settingsSavePending = false;
@@ -3628,7 +3546,6 @@ void processSettingsSave() {
   Serial.println(F("[NETATMO] Settings saved successfully"));
 }
 
-// Content from enhancedApiResponse.ino
 
 // Function to enhance API responses with CORS headers and logging
 void enhanceApiResponse(AsyncWebServerRequest *request, const char* contentType, const String &payload) {
@@ -3648,56 +3565,7 @@ void enhanceApiResponse(AsyncWebServerRequest *request, const char* contentType,
 }
 
 // Function to stream a file with enhanced headers
-void sendFileWithEnhancedHeaders(AsyncWebServerRequest *request, const char* filePath, const char* contentType) {
-  // Check if the file exists
-  if (!LittleFS.exists(filePath)) {
-    enhanceApiResponse(request, "application/json", "{\"error\":\"File not found\"}");
-    return;
-  }
-  
-  // Use chunked response for files to reduce memory usage
-  AsyncWebServerResponse *response = request->beginChunkedResponse(contentType, 
-    [filePath](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
-      static File file;
-      static size_t totalSent = 0;
-      
-      // Open file on first call
-      if (index == 0) {
-        file = LittleFS.open(filePath, "r");
-        totalSent = 0;
-        if (!file) return 0;
-      }
-      
-      // Check if we've sent everything
-      if (totalSent >= file.size()) {
-        file.close();
-        return 0; // End of file
-      }
-      
-      // Read a chunk - use larger chunks (up to 1KB)
-      size_t bytesToRead = min(maxLen, file.size() - totalSent);
-      size_t bytesRead = file.read(buffer, bytesToRead);
-      
-      if (bytesRead > 0) {
-        totalSent += bytesRead;
-        return bytesRead;
-      } else {
-        file.close();
-        return 0; // Error or end of file
-      }
-    }
-  );
-  
-  // Add CORS headers
-  response->addHeader("Access-Control-Allow-Origin", "*");
-  response->addHeader("Access-Control-Allow-Methods", "GET");
-  response->addHeader("Access-Control-Allow-Headers", "Content-Type");
-  response->addHeader("Cache-Control", "no-cache");
-  
-  request->send(response);
-}
 
-// Content from fetchNetatmoDevices.ino
 
 // Function to fetch Netatmo stations and devices - Redirects to the new implementation
 String fetchNetatmoDevices() {
@@ -3711,7 +3579,6 @@ String fetchNetatmoDevices() {
   return "{\"body\":{\"devices\":[]},\"status\":\"fetching\"}";
 }
 
-// Content from fetchNetatmoIndoorTemp.ino
 
 // Function to fetch indoor temperature from Netatmo
 void fetchNetatmoIndoorTemperature() {
@@ -3935,7 +3802,6 @@ void fetchNetatmoIndoorTemperature() {
   }
 }
 
-// Content from fileDebugger.ino
 
 // Define DEBUG_FILE_DUMP to enable file dumping
 // Comment this out in production to save memory
@@ -3988,40 +3854,9 @@ void dumpFileContents(const char* filePath) {
 #endif
 }
 
-// Content from fileSystemDebug.ino
 
 // Function to list all files in the LittleFS filesystem
-void listAllFiles() {
-  Serial.println(F("[FS] Listing all files in LittleFS:"));
-  
-  // List files in root directory
-  Serial.println(F("[FS] Root directory:"));
-  Dir rootDir = LittleFS.openDir("/");
-  while (rootDir.next()) {
-    Serial.print(F("  "));
-    Serial.print(rootDir.fileName());
-    Serial.print(F(" - "));
-    Serial.println(rootDir.fileSize());
-  }
-  
-  // Check if devices directory exists
-  Serial.print(F("[FS] Devices directory exists: "));
-  Serial.println(LittleFS.exists("/devices") ? F("Yes") : F("No"));
-  
-  // If devices directory exists, list its contents
-  if (LittleFS.exists("/devices")) {
-    Serial.println(F("[FS] Files in /devices:"));
-    Dir devDir = LittleFS.openDir("/devices");
-    while (devDir.next()) {
-      Serial.print(F("  "));
-      Serial.print(devDir.fileName());
-      Serial.print(F(" - "));
-      Serial.println(devDir.fileSize());
-    }
-  }
-}
 
-// Content from formatTemperature.ino
 
 // Helper function to format temperature based on units
 String formatTemperature(float temperature, bool roundToInteger) {
@@ -4083,7 +3918,6 @@ String formatTemperature(float temperature, bool roundToInteger) {
   return String(buffer);
 }
 
-// Content from handleBlockedRequest.ino
 
 // Function to handle "request is blocked" errors from Netatmo
 void handleBlockedRequest(String errorPayload) {
@@ -4120,38 +3954,12 @@ void handleBlockedRequest(String errorPayload) {
   lastBlockedRequest = millis();
 }
 
-// Content from httpTimeoutFix.ino
 
 // Function to set up HTTP client with improved timeout settings
-void setupHttpClientWithTimeout(HTTPClient &https) {
-  // Set a longer timeout for the HTTP client
-  https.setTimeout(15000); // 15 seconds timeout
-  
-  // Log the timeout setting
-  Serial.println(F("[HTTP] Setting HTTP client timeout to 15 seconds"));
-}
 
-// Content from logApiRequest.ino
 
 // Function to log the complete API request details - simplified version
-void logApiRequest(const char* url, const char* token) {
-  Serial.println(F("[API] Request details:"));
-  Serial.print(F("[API] URL: "));
-  Serial.println(url);
-  Serial.println(F("[API] Method: GET"));
-  
-  // Only log the first 5 and last 5 chars of the token
-  Serial.print(F("[API] Token: "));
-  if (strlen(token) > 10) {
-    Serial.print(String(token).substring(0, 5));
-    Serial.print(F("..."));
-    Serial.println(String(token).substring(strlen(token) - 5));
-  } else {
-    Serial.println(F("(token too short)"));
-  }
-}
 
-// Content from memoryCleanup.ino
 
 // Memory cleanup functions
 
@@ -4170,7 +3978,6 @@ void releaseUnusedMemory() {
   yield();
 }
 
-// Content from memoryDefrag.ino
 
 // Memory defragmentation functions
 
@@ -4205,9 +4012,6 @@ void forceGarbageCollection() {
   yield();
 }
 
-void safeGarbageCollection() {
-  yield();
-}
 
 // Function to check if defragmentation is needed
 bool shouldDefragment() {
@@ -4218,7 +4022,6 @@ bool shouldDefragment() {
   return (fragmentation > 50 || freeStack < 2048);
 }
 
-// Content from netatmoTokenValidator.ino
 
 // Function to check if the Netatmo access token is valid
 bool isNetatmoTokenValid() {
@@ -4242,7 +4045,6 @@ bool isNetatmoTokenValid() {
   return true;
 }
 
-// Content from networkCheck.ino
 
 // Function to check network connectivity
 bool checkNetworkConnectivity() {
@@ -4278,7 +4080,6 @@ bool checkNetworkConnectivity() {
   return dnsResult;
 }
 
-// Content from optimizedHandlers.ino
 
 // Optimized handlers for web requests to reduce memory usage
 
@@ -4343,7 +4144,6 @@ void setupOptimizedHandlers() {
   });
 }
 
-// Content from optimizeMemory.ino
 
 // Memory optimization functions
 
@@ -4370,7 +4170,6 @@ void createAuthHeader(char* buffer, size_t bufferSize, const char* token) {
   snprintf(buffer, bufferSize, "Bearer %s", token);
 }
 
-// Content from parseNetatmoJson.ino
 
 // Function to parse Netatmo JSON with proper error handling and memory management
 bool parseNetatmoJson(String &payload, JsonDocument &doc) {
@@ -4402,11 +4201,8 @@ bool parseNetatmoJson(String &payload, JsonDocument &doc) {
   return true;
 }
 
-// Content from refreshTokenFix.ino
 
-// Content from resetNetatmoAuth.ino
 
-// Content from saveSettingsHandler.ino
 
 
 // Function to set up the save settings handler
@@ -4493,7 +4289,6 @@ void setupSaveSettingsHandler() {
   
 }
 
-// Content from setupNetatmoHandler.ino
 
 /*
  * Netatmo Handler
@@ -4513,7 +4308,6 @@ static String pendingCode = "";
 static bool tokenExchangePending = false;
 static bool fetchDevicesPending = false;
 static bool fetchStationsDataPending = false;
-static String deviceData = "";
 
 // Helper function to URL encode a string (memory-efficient version)
 String urlEncode(const char* input) {
@@ -4615,7 +4409,6 @@ bool refreshNetatmoToken() {
   strcat(postData, netatmoRefreshToken);
   
   // Defragment heap right before making the request
-  Serial.println(F("[MEMORY] Final defragmentation before API call"));
   defragmentHeap();
   yield(); // Allow the watchdog to be fed
   
@@ -4657,15 +4450,11 @@ bool refreshNetatmoToken() {
       netatmoRefreshToken[0] = '\0';
       netatmoAccessToken[0] = '\0';
       saveTokensToConfig();
-      refreshTokenAuthFailed = true;
       netatmoStatus = NETATMO_AUTH_FAIL;
-      Serial.println(F("[NETATMO] Setting refreshTokenAuthFailed flag"));
     } else if (httpCode <= 0) {
       // This is a connection error
       Serial.println(F("[NETATMO] Connection error, not clearing refresh token"));
-      refreshTokenConnectionFailed = true;
       netatmoStatus = NETATMO_CONN_FAIL;
-      Serial.println(F("[NETATMO] Setting refreshTokenConnectionFailed flag"));
     }
     
     return false;
@@ -4708,8 +4497,6 @@ bool refreshNetatmoToken() {
   strlcpy(netatmoRefreshToken, refreshToken, sizeof(netatmoRefreshToken));
   
   // Reset the auth failure flag since we got a valid token
-  refreshTokenAuthFailed = false;
-  refreshTokenConnectionFailed = false;
   
   // Save the tokens to config
   saveTokensToConfig();
@@ -4729,9 +4516,6 @@ void triggerNetatmoDevicesFetch() {
 }
 
 // Function to get cached device data
-String getNetatmoDeviceData() {
-  return deviceData;
-}
 
 // Function to exchange authorization code for tokens
 void exchangeAuthCode(const String &code) {
@@ -5405,7 +5189,6 @@ void processTokenExchange() {
   // Perform heap defragmentation after API call
   Serial.println(F("[NETATMO] Performing post-API call heap defragmentation"));
   defragmentHeap();
-  printMemoryStats();
   
   // Trigger a fetch of the stations data
   fetchStationsDataPending = true;
@@ -5419,9 +5202,7 @@ void processFetchDevices() {
   
   Serial.println(F("[NETATMO] Fetching Netatmo devices"));
   
-  // Print memory stats before processing
   Serial.println(F("[NETATMO] Memory stats before fetch devices:"));
-  printMemoryStats();
   
   // Defragment heap if needed
   if (shouldDefragment()) {
@@ -5434,13 +5215,11 @@ void processFetchDevices() {
   
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println(F("[NETATMO] Error - WiFi not connected"));
-    deviceData = F("{\"error\":\"WiFi not connected\"}");
     return;
   }
   
   if (strlen(netatmoAccessToken) == 0) {
     Serial.println(F("[NETATMO] Error - No access token"));
-    deviceData = F("{\"error\":\"No access token\"}");
     return;
   }
   
@@ -5458,7 +5237,6 @@ void processFetchDevices() {
   
   if (!https.begin(*client, apiUrl)) {
     Serial.println(F("[NETATMO] Error - Failed to connect"));
-    deviceData = F("{\"error\":\"Failed to connect to Netatmo API\"}");
     return;
   }
   
@@ -5490,10 +5268,8 @@ void processFetchDevices() {
       if (resolved) {
         Serial.print(F("[NETATMO] DNS resolution successful. IP: "));
         Serial.println(ip.toString());
-        deviceData = "{\"error\":\"Connection failed. DNS resolved to " + ip.toString() + "\"}";
       } else {
         Serial.println(F("[NETATMO] DNS resolution failed"));
-        deviceData = F("{\"error\":\"Connection failed. DNS resolution failed.\"}");
       }
       
       https.end();
@@ -5534,13 +5310,10 @@ void processFetchDevices() {
       // Try to refresh the token
       if (refreshNetatmoToken()) {
         Serial.println(F("[NETATMO] Token refreshed, retrying request"));
-        deviceData = F("{\"status\":\"token_refreshed\",\"message\":\"Token refreshed. Please try again.\"}");
       } else {
         Serial.println(F("[NETATMO] Failed to refresh token"));
-        deviceData = F("{\"error\":\"Failed to refresh token\"}");
       }
     } else {
-      deviceData = "{\"error\":\"API error: " + String(httpCode) + "\"}";
     }
     return;
   }
@@ -5554,7 +5327,6 @@ void processFetchDevices() {
   
   if (fs_info.totalBytes - fs_info.usedBytes < https.getSize() * 2) {
     Serial.println(F("[NETATMO] Not enough space to save device data"));
-    deviceData = F("{\"error\":\"Not enough space to save device data\"}");
     https.end();
     apiCallInProgress = false;
     return;
@@ -5576,7 +5348,6 @@ void processFetchDevices() {
   File deviceFile = LittleFS.open("/netatmo_config.json", "w");
   if (!deviceFile) {
     Serial.println(F("[NETATMO] Failed to open file for writing"));
-    deviceData = F("{\"error\":\"Failed to open file for writing\"}");
     https.end();
     apiCallInProgress = false;
     return;
@@ -5704,16 +5475,12 @@ void processFetchDevices() {
   dumpFileContents("/netatmo_config.json");
   
   // Set a success response
-  deviceData = "{\"status\":\"success\",\"message\":\"Device data saved to file\",\"bytes\":" + String(totalRead) + "}";
   
-  // Print memory stats after processing
   Serial.println(F("[NETATMO] Memory stats after fetch devices:"));
-  printMemoryStats();
   
   // Perform heap defragmentation after API call
   Serial.println(F("[NETATMO] Performing post-API call heap defragmentation"));
   defragmentHeap();
-  printMemoryStats();
 }
 
 // Function to be called from loop() to process pending credential saves
@@ -5840,7 +5607,6 @@ void fetchStationsData() {
   Serial.println(F("[NETATMO] Sending request..."));
   
   // Defragment heap right before making the request
-  Serial.println(F("[MEMORY] Final defragmentation before API call"));
   defragmentHeap();
   
   unsigned long requestStartTime = millis();
@@ -5852,9 +5618,6 @@ void fetchStationsData() {
   Serial.print(requestEndTime - requestStartTime);
   Serial.println(F(" ms"));
   
-  // Report memory status immediately after the API call
-  Serial.println(F("[MEMORY] Memory status immediately after API call:"));
-  printMemoryStats();
   
   Serial.print(F("[NETATMO] HTTP response code: "));
   Serial.println(httpCode);
@@ -6034,7 +5797,6 @@ void fetchStationsData() {
   https.end();
   
   // Force garbage collection to free memory
-  Serial.println(F("[MEMORY] Forcing garbage collection after HTTP request"));
   forceGarbageCollection();
   
   unsigned long afterFileWriteTime = millis();
@@ -6072,12 +5834,8 @@ void fetchStationsData() {
   Serial.println(F("[NETATMO] Response preview:"));
   Serial.println(responsePreview);
   
-  // Report memory status after API call
-  Serial.println(F("[MEMORY] Memory status after API call:"));
-  printMemoryStats();
   
   // Defragment heap after API call and before extracting device info
-  Serial.println(F("[MEMORY] Defragmenting heap after API call"));
   defragmentHeap();
   
   unsigned long beforeExtractTime = millis();
@@ -6286,17 +6044,10 @@ void processFetchStationsData() {
 void fetchStationsDataFallback() {
   Serial.println(F("[NETATMO] Fetching stations data using fallback endpoint"));
   
-  // Report memory status before API call
-  Serial.println(F("[MEMORY] Memory status before fallback API call:"));
-  printMemoryStats();
   
   // Defragment heap before making the API call
-  Serial.println(F("[MEMORY] Defragmenting heap before fallback API call"));
   defragmentHeap();
   
-  // Report memory status after defragmentation
-  Serial.println(F("[MEMORY] Memory status after defragmentation:"));
-  printMemoryStats();
   
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println(F("[NETATMO] Error - WiFi not connected"));
@@ -6476,220 +6227,22 @@ void fetchStationsDataFallback() {
   Serial.println(F("[NETATMO] Fallback response preview:"));
   Serial.println(responsePreview);
   
-  // Report memory status after API call
-  Serial.println(F("[MEMORY] Memory status after fallback API call:"));
-  printMemoryStats();
   
   // Defragment heap after API call and before extracting device info
-  Serial.println(F("[MEMORY] Defragmenting heap after fallback API call"));
   defragmentHeap();
   
-  // Report memory status after defragmentation
-  Serial.println(F("[MEMORY] Memory status after post-API defragmentation:"));
-  printMemoryStats();
   
   // Now extract the device and module IDs for easy access
   extractDeviceInfo();
 }
 // External declarations
-extern bool chunkedTransferComplete;
 
-// Content from simpleNetatmoCall.ino
 
 // A simple, minimal implementation to call the Netatmo API
-void simpleNetatmoCall() {
-  Serial.println(F("[NETATMO] Making simple API call"));
-  
-  // Create a secure client
-  BearSSL::WiFiClientSecure client;
-  client.setInsecure(); // Skip certificate validation
-  
-  HTTPClient https;
-  https.setTimeout(5000); // Reduce timeout to 5 seconds to avoid watchdog issues
-  
-  // Try the homesdata endpoint
-  String apiUrl = "https://api.netatmo.com/api/homesdata";
-  Serial.print(F("[NETATMO] Trying endpoint: "));
-  Serial.println(apiUrl);
-  
-  Serial.println(F("========== FULL REQUEST (SIMPLE) =========="));
-  Serial.print(F("GET "));
-  Serial.print(apiUrl);
-  Serial.println(F(" HTTP/1.1"));
-  Serial.println(F("Host: api.netatmo.com"));
-  Serial.print(F("Authorization: Bearer "));
-  Serial.println(netatmoAccessToken); // Print full token for debugging
-  Serial.println(F("Accept: application/json"));
-  Serial.println(F("=================================="));
-  
-  if (!https.begin(client, apiUrl)) {
-    Serial.println(F("[NETATMO] Error - Failed to connect"));
-    return;
-  }
-  
-  // Add authorization header - as simple as possible
-  String authHeader = "Bearer ";
-  authHeader += netatmoAccessToken;
-  https.addHeader("Authorization", authHeader);
-  https.addHeader("Accept", "application/json");
-  
-  // Make the request
-  Serial.println(F("[NETATMO] Sending request..."));
-  
-  // Add yield before making the request
-  yield();
-  
-  int httpCode = https.GET();
-  
-  // Add yield immediately after making the request
-  yield();
-  
-  Serial.print(F("[NETATMO] HTTP response code: "));
-  Serial.println(httpCode);
-  
-  Serial.println(F("========== FULL RESPONSE (SIMPLE) =========="));
-  
-  if (httpCode == HTTP_CODE_OK) {
-    // Create the devices directory if it doesn't exist
-    if (!LittleFS.exists("/devices")) {
-      LittleFS.mkdir("/devices");
-    }
-    
-    // Open a file to save the response
-    File file = LittleFS.open("/netatmo_simple.json", "w");
-    if (!file) {
-      Serial.println(F("[NETATMO] Failed to open file for writing"));
-      https.end();
-      return;
-    }
-    
-    // Get the response in chunks with yield calls
-    WiFiClient* stream = https.getStreamPtr();
-    if (stream) {
-      const size_t bufSize = 128; // Smaller buffer size to avoid memory issues
-      uint8_t buf[bufSize];
-      int totalRead = 0;
-      String preview = "";
-      bool previewComplete = false;
-      
-      // Read data in chunks with yield calls
-      while (https.connected()) {
-        // Feed the watchdog
-        yield();
-        
-        size_t available = stream->available();
-        if (available) {
-          // Read up to buffer size
-          size_t readBytes = available > bufSize ? bufSize : available;
-          int bytesRead = stream->readBytes(buf, readBytes);
-          
-          if (bytesRead > 0) {
-            // Write to file
-            file.write(buf, bytesRead);
-            totalRead += bytesRead;
-            
-            // Capture preview for logging
-            if (!previewComplete) {
-              for (int i = 0; i < bytesRead && preview.length() < 200; i++) {
-                preview += (char)buf[i];
-              }
-              if (preview.length() >= 200) {
-                previewComplete = true;
-              }
-            }
-            
-            // Print progress and feed watchdog
-            if (totalRead % 256 == 0) {
-              Serial.print(F("[NETATMO] Read "));
-              Serial.print(totalRead);
-              Serial.println(F(" bytes"));
-              yield();
-            }
-          }
-        } else if (!https.connected()) {
-          break;
-        } else {
-          // No data available but still connected, wait a bit and feed watchdog
-          delay(1);
-          yield();
-        }
-      }
-      
-      file.close();
-      
-      Serial.print(F("[NETATMO] Total bytes read: "));
-      Serial.println(totalRead);
-      
-      Serial.println(F("[NETATMO] Response preview:"));
-      Serial.println(preview);
-    } else {
-      // Fallback to getString() if streaming doesn't work
-      Serial.println(F("[NETATMO] Using getString() fallback"));
-      
-      // Get the response with yield calls
-      String payload = "";
-      size_t chunkSize = 128;
-      size_t totalSize = https.getSize();
-      size_t remaining = totalSize;
-      
-      while (remaining > 0) {
-        // Get a chunk of the response
-        size_t toRead = remaining > chunkSize ? chunkSize : remaining;
-        String chunk = https.getString();
-        
-        // Append to payload
-        payload += chunk;
-        remaining -= chunk.length();
-        
-        // Feed the watchdog
-        yield();
-      }
-      
-      // Save to file
-      file.print(payload);
-      file.close();
-      
-      Serial.println(F("[NETATMO] Response preview:"));
-      if (payload.length() > 200) {
-        Serial.println(payload.substring(0, 200) + "...");
-      } else {
-        Serial.println(payload);
-      }
-    }
-  } else {
-    Serial.println(F("[NETATMO] Error response:"));
-    
-    // Get error response with yield
-    String payload = "";
-    size_t chunkSize = 128;
-    
-    // Get the response in smaller chunks
-    while (https.connected()) {
-      String chunk = https.getString().substring(0, chunkSize);
-      if (chunk.length() == 0) break;
-      
-      payload += chunk;
-      
-      // Feed the watchdog
-      yield();
-    }
-    
-    Serial.println(payload);
-  }
-  
-  Serial.println(F("==================================="));
-  https.end();
-  
-  // Final yield to ensure watchdog is fed
-  yield();
-}
-
-// Content from merged_content.ino
 
 
-// Content from tokenLogger.ino
 
-// Content from tokenValidator.ino
+
 
 // Function to check if the error payload indicates an invalid token
 bool isInvalidTokenError(const String &errorPayload) {
