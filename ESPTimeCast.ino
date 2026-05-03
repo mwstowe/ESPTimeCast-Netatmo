@@ -282,6 +282,7 @@ enum NetatmoStatus {
   NETATMO_API_ERROR  // API returned an error         -> "err"
 };
 NetatmoStatus netatmoStatus = NETATMO_OK;
+int lastNetatmoHttpCode = 0;
 
 // Flag to track if refresh token authentication has failed
 bool refreshTokenAuthFailed = false;
@@ -1139,7 +1140,7 @@ String getNetatmoToken() {
   optimizeBearSSLClient(client.get()); // Use our optimization function
   
   HTTPClient https;
-  optimizeHTTPClient(https); // Use our optimization function
+  optimizeHTTPClient(https);
   String token = "";
   
   // Add DNS resolution test
@@ -1573,11 +1574,14 @@ void fetchOutdoorTemperature(bool roundToInteger = true) {
   printMemoryStats();
   
   // Create a smaller buffer size for the SSL client
-  BearSSL::WiFiClientSecure client;
-  client.setInsecure(); // Skip certificate validation
-  client.setBufferSizes(512, 512); // Use even smaller buffer sizes
+  // Use static to avoid stack allocation — BearSSL::WiFiClientSecure is large
+  static BearSSL::WiFiClientSecure client;
+  client.setInsecure();
+  client.setBufferSizes(512, 512);
   
-  HTTPClient https;
+  static HTTPClient https;
+  https.setTimeout(10000);
+  https.useHTTP10(true); // HTTP/1.0 avoids chunked encoding, saves memory
   
   String url = "https://api.netatmo.com/api/getstationsdata?device_id=";
   url += netatmoDeviceId;
@@ -1602,10 +1606,10 @@ void fetchOutdoorTemperature(bool roundToInteger = true) {
     
     if (httpCode == HTTP_CODE_OK) {
       String payload = https.getString();
-      Serial.println(F("[NETATMO] Response received:"));
-      Serial.println(payload);
+      https.end(); // Free BearSSL memory before JSON parsing
+      Serial.println(F("[NETATMO] Response received"));
       
-      JsonDocument doc; // Increased from 4096 to 8192
+      JsonDocument doc;
       
       if (parseNetatmoJson(payload, doc)) {
         // Navigate through the JSON to find the outdoor module
@@ -1791,6 +1795,7 @@ void fetchOutdoorTemperature(bool roundToInteger = true) {
         netatmoStatus = NETATMO_CONN_FAIL;
       } else {
         netatmoStatus = NETATMO_API_ERROR;
+        lastNetatmoHttpCode = httpCode;
       }
       
       outdoorTempAvailable = false;
@@ -2142,7 +2147,7 @@ void loop() {
         case NETATMO_AUTH_FAIL: P.print("auth"); break;
         case NETATMO_CONN_FAIL: P.print("conn"); break;
         case NETATMO_NO_CONFIG: P.print("conf"); break;
-        case NETATMO_API_ERROR: P.print("err");  break;
+        case NETATMO_API_ERROR: P.print(String(lastNetatmoHttpCode).c_str()); break;
         default: break;
       }
     } else {
@@ -4371,49 +4376,25 @@ void createAuthHeader(char* buffer, size_t bufferSize, const char* token) {
 bool parseNetatmoJson(String &payload, JsonDocument &doc) {
   Serial.println(F("[NETATMO] Parsing JSON response..."));
   
-  // Try with the provided document first
-  DeserializationError error = deserializeJson(doc, payload);
+  // Always use a filter — critical for ESP8266 memory with ArduinoJson v7
+  JsonDocument filter;
+  JsonObject filter_body = filter["body"].to<JsonObject>();
+  JsonArray filter_devices = filter_body["devices"].to<JsonArray>();
+  JsonObject device = filter_devices.add<JsonObject>();
+  device["_id"] = true;
+  device["station_name"] = true;
+  device["dashboard_data"]["Temperature"] = true;
+  JsonArray modules = device["modules"].to<JsonArray>();
+  JsonObject module = modules.add<JsonObject>();
+  module["_id"] = true;
+  module["module_name"] = true;
+  module["dashboard_data"]["Temperature"] = true;
+
+  DeserializationError error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
   
   if (error) {
     Serial.print(F("[NETATMO] JSON parse error: "));
     Serial.println(error.c_str());
-    
-    // If it's a memory error, try to extract just the essential parts
-    if (error == DeserializationError::NoMemory) {
-      Serial.println(F("[NETATMO] Memory error - trying to extract only essential data"));
-      
-      // Create a filter to only extract the parts we need
-      JsonDocument filter;
-      
-      // For station data
-      JsonObject filter_body = filter["body"].to<JsonObject>();
-      JsonArray filter_devices = filter_body["devices"].to<JsonArray>();
-      
-      JsonObject device = filter_devices.add<JsonObject>();
-      device["_id"] = true;
-      device["station_name"] = true;
-      
-      JsonArray modules = device["modules"].to<JsonArray>();
-      JsonObject module = modules.add<JsonObject>();
-      module["_id"] = true;
-      module["module_name"] = true;
-      
-      JsonObject dashboard = module["dashboard_data"].to<JsonObject>();
-      dashboard["Temperature"] = true;
-      
-      // Try parsing with the filter
-      error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
-      
-      if (error) {
-        Serial.print(F("[NETATMO] Filtered JSON parse still failed: "));
-        Serial.println(error.c_str());
-        return false;
-      } else {
-        Serial.println(F("[NETATMO] Successfully parsed filtered JSON"));
-        return true;
-      }
-    }
-    
     return false;
   }
   
