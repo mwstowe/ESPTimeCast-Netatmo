@@ -4954,88 +4954,25 @@ void setupNetatmoHandler() {
     request->send(200, "application/json", response);
   });
   
-  // Add a token refresh endpoint
+  // Clear tokens endpoint — no HTTPS call, just wipes stored tokens
+  server.on("/api/netatmo/clear-tokens", HTTP_GET, [](AsyncWebServerRequest *request) {
+    netatmoAccessToken[0] = '\0';
+    netatmoRefreshToken[0] = '\0';
+    saveTokensToConfig();
+    netatmoStatus = NETATMO_NO_TOKEN;
+    request->send(200, "application/json", "{\"status\":\"tokens cleared\"}");
+  });
+
+  // Add a token refresh endpoint — defers to main loop to avoid stack overflow
   server.on("/api/netatmo/refresh-token", HTTP_GET, [](AsyncWebServerRequest *request) {
     Serial.println(F("[NETATMO] Handling token refresh request"));
-    
     if (strlen(netatmoRefreshToken) == 0) {
-      Serial.println(F("[NETATMO] Error - No refresh token"));
       request->send(401, "application/json", "{\"error\":\"No refresh token available\"}");
       return;
     }
-    
-    // Create a new client for the API call
-    static BearSSL::WiFiClientSecure client;
-    client.setInsecure(); // Skip certificate validation to save memory
-    
-    HTTPClient https;
-    https.setTimeout(10000); // 10 second timeout
-    
-    if (!https.begin(client, "https://api.netatmo.com/oauth2/token")) {
-      Serial.println(F("[NETATMO] Error - Failed to connect"));
-      request->send(500, "application/json", "{\"error\":\"Failed to connect to Netatmo API\"}");
-      return;
-    }
-    
-    https.addHeader("Content-Type", "application/x-www-form-urlencoded");
-    
-    // Build the POST data
-    String postData = "grant_type=refresh_token";
-    postData += "&client_id=";
-    postData += urlEncode(netatmoClientId);
-    postData += "&client_secret=";
-    postData += urlEncode(netatmoClientSecret);
-    postData += "&refresh_token=";
-    postData += urlEncode(netatmoRefreshToken);
-    
-    // Make the request
-    int httpCode = https.POST(postData);
-    
-    if (httpCode != HTTP_CODE_OK) {
-      Serial.print(F("[NETATMO] Error - HTTP code: "));
-      Serial.println(httpCode);
-      String errorPayload = https.getString();
-      Serial.print(F("[NETATMO] Error payload: "));
-      Serial.println(errorPayload);
-      https.end();
-      request->send(httpCode, "application/json", errorPayload);
-      return;
-    }
-    
-    // Get the response
-    String response = https.getString();
-    https.end();
-    
-    // Parse the response
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, response);
-    
-    if (error) {
-      Serial.print(F("[NETATMO] JSON parse error: "));
-      Serial.println(error.c_str());
-      request->send(500, "application/json", "{\"error\":\"Failed to parse response\"}");
-      return;
-    }
-    
-    // Extract the tokens
-    if (!doc["access_token"].is<JsonVariant>() || !doc["refresh_token"].is<JsonVariant>()) {
-      Serial.println(F("[NETATMO] Missing tokens in response"));
-      request->send(500, "application/json", "{\"error\":\"Missing tokens in response\"}");
-      return;
-    }
-    
-    // Save the tokens
-    const char* accessToken = doc["access_token"];
-    const char* refreshToken = doc["refresh_token"];
-    
-    Serial.println(F("[NETATMO] Saving new tokens"));
-    strlcpy(netatmoAccessToken, accessToken, sizeof(netatmoAccessToken));
-    strlcpy(netatmoRefreshToken, refreshToken, sizeof(netatmoRefreshToken));
-    
-    saveTokensToConfig();
-    
-    // Send success response
-    request->send(200, "application/json", "{\"success\":true,\"message\":\"Token refreshed successfully\"}");
+    needTokenRefresh = true;
+    netatmoAccessToken[0] = '\0'; // Force re-fetch
+    request->send(200, "application/json", "{\"status\":\"token refresh scheduled\"}");
   });
   
   // Endpoint to save Netatmo settings without rebooting
